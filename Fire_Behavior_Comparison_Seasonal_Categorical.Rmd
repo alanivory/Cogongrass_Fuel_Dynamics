@@ -1,0 +1,2969 @@
+---
+title: "Fire Behavior Comparison"
+author: "Alan Ivory"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+pacman::p_load(tidyverse, brms, readxl, parameters, gt, posterior, forcats, emmeans, bayestestR, patchwork)
+
+# Set seed
+set.seed(97)
+
+fb <- read_excel("C:/Users/DrewIvory/OneDrive - University of Florida/Desktop/School/PHD/01_Projects/01_FuelDynamics/02_Data/02_Fuel_Data/Seasonal_Fire_Comb.xlsx",
+                 sheet = "Seasonal_Comb")
+
+# Remove rows with NA in S_ROS
+fb <- fb %>%
+  dplyr::filter(!is.na(S_ROS))
+
+priors <- c(
+  prior(normal(0, 1), class = "b"),
+  prior(student_t(3, 0, 2), class = "sigma")
+)
+```
+
+
+## GLMM Surface Rate of Spread
+```{r GLMM_Sur_ROS, include=FALSE}
+fb$Status <- relevel(factor(fb$Status), ref = "Non_Invaded")
+fb$Season <- recode(fb$Season, "Green_Up" = "Spring")
+fb$Season <- relevel(factor(fb$Season), ref = "Summer")
+
+S_ROS_model_student <- brm(S_ROS ~
+                             Status * Season,
+                           data = fb,
+                           family = student(),
+                           prior = priors,
+                           chains = 4,
+                           iter = 4000,
+                           warmup = 1000,
+                           control = list(adapt_delta = 0.95)
+                           )
+
+```
+
+## Rate of Spread Model Comparison
+```{r compare_S_ROS, echo=FALSE}
+summary(S_ROS_model_student)
+
+# Plot the posterior predictive checks
+pp_check(S_ROS_model_student) +
+  labs(title = "Posterior Predictive Check for Surface Rate of Spread Model") +
+  theme_minimal()
+
+# Plot the relationship between invasion status and surface rate of spread
+fb %>%
+  ggplot(aes(x = Status, y = S_ROS)) +
+  geom_boxplot() +
+  geom_jitter(width = 0.2, alpha = 0.2) +
+  labs(title = "Surface Rate of Spread by Invasion Status",
+       x = "Invasion Status",
+       y = "Surface Rate of Spread (m/min)") +
+  theme_minimal()
+
+ggplot(fb, aes(x = Status, y = S_ROS, fill = Season)) +
+  geom_boxplot() +
+  geom_jitter(position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.75),
+              alpha = 0.05,
+              shape = 16) + # Using a solid circle shape
+  labs(title = "Surface Rate of Spread by Invasion Status and Season",
+       x = "Invasion Status",
+       y = "Surface Rate of Spread (m/min)",
+       fill = "Season") +
+  theme_minimal() +
+  scale_fill_viridis_d()
+
+
+```
+
+## Surface Rate of Spread Table
+```{r surface_rate_of_spread_table, echo=FALSE}
+# --- 2. Extract draws and filter for parameters of interest ---
+sros_draws_filtered <- as_draws_df(S_ROS_model_student) %>%
+  select(starts_with("b_"))
+
+# --- 3. Calculate diagnostics ---
+sros_diagnostics <- summarise_draws(
+  sros_draws_filtered,
+  "R-hat" = rhat,
+  "Bulk ESS" = ess_bulk,
+  "Tail ESS" = ess_tail
+)
+
+# --- 4. Calculate estimates and HPDIs ---
+sros_estimates <- sros_draws_filtered %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = "variable",
+    values_to = "value"
+  ) %>%
+  group_by(variable) %>%
+  summarise(
+    Estimate = median(value),
+    `Est. Error` = mad(value),
+    HPDI_lower = hdi(value, ci = 0.95)$CI_low,
+    HPDI_upper = hdi(value, ci = 0.95)$CI_high,
+    `Pd` = max(mean(value > 0), mean(value < 0)),
+    .groups = "drop"
+  )
+
+# --- 5. Join the estimates and diagnostics into one table ---
+sros_summary_df <- left_join(sros_estimates, sros_diagnostics, by = "variable")
+
+# --- 6. Clean and format the summary data frame ---
+sros_summary_df_cleaned <- sros_summary_df %>%
+  mutate(
+    Parameter = gsub("b_", "", variable),
+    Parameter = gsub("StatusInvaded", "Status-Invaded", Parameter),
+    Parameter = gsub("SeasonSummer", "Season-Summer", Parameter),
+    Parameter = gsub("SeasonWinter", "Season-Winter", Parameter),
+    Parameter = gsub(":", " x ", Parameter)
+  ) %>%
+  select(
+    Parameter,
+    Estimate,
+    `Est. Error`,
+    `HPDI_lower`,
+    `HPDI_upper`,
+    `Pd`,
+    `Bulk ESS`,
+    `Tail ESS`,
+    `R-hat`
+  ) %>%
+  mutate(Parameter = fct_relevel(Parameter, "Intercept")) %>%
+  arrange(Parameter) %>%
+  rename(
+    `95% HPDI (Lower)` = `HPDI_lower`,
+    `95% HPDI (Upper)` = `HPDI_upper`
+  )
+
+# --- 7. Create the final gt table ---
+sros_gt_table <- sros_summary_df_cleaned %>%
+  mutate(Significant = Pd >= 0.95) %>%
+  gt(rowname_col = "Parameter") %>%
+  fmt_number(
+    columns = c("Estimate", "Est. Error", "95% HPDI (Lower)", "95% HPDI (Upper)"),
+    decimals = 2
+  ) %>%
+  fmt_number(
+    columns = c("Pd", "R-hat"),
+    decimals = 3
+  ) %>%
+  fmt_number(
+    columns = c("Bulk ESS", "Tail ESS"),
+    decimals = 0,
+    use_seps = TRUE
+  ) %>%
+  tab_style(
+    style = cell_text(weight = "bold"),
+    locations = cells_body(
+      rows = Significant == TRUE
+    )
+  ) %>%
+  cols_hide(columns = "Significant") %>%
+  tab_header(title = "Posterior Estimates for Surface Rate of Spread")
+
+# --- 8. Print ---
+print(sros_gt_table)
+
+# Save the final table to a Word document
+gtsave(
+  sros_gt_table, 
+  "C:/Users/DrewIvory/OneDrive - University of Florida/Desktop/School/PHD/01_Projects/01_FuelDynamics/02_Data/Posterior_Probabilities/Seasonal_S_ROS_Posterior_Table.docx"
+)
+```
+
+
+## ROS Conditional Effects
+```{r conditional_effects_S_ROS, echo=FALSE}
+# Calculate conditional effects and extract the data frame
+SROS_ce_Status <- conditional_effects(S_ROS_model_student, effects = "Status")
+SROS_df_Status <- SROS_ce_Status[["Status"]]
+
+# Re-level the factor for plotting
+SROS_df_Status$Status <- factor(SROS_df_Status$Status,
+                                levels = c("Non_Invaded", "Invaded"),
+                                labels = c("Non-Invaded", "Invaded"))
+
+# Plot
+ggplot(SROS_df_Status, aes(x = Status, y = estimate__, color = Status)) +
+  # Add points for the mean estimates
+  geom_point(size = 4) +
+  # Add error bars for the 95% credible interval
+  geom_errorbar(aes(ymin = lower__, ymax = upper__), 
+                width = 0.15, size = 1) +
+  labs(
+    title = "Estimated Surface Rate of Spread by Invasion Status",
+    x = "Invasion Status",
+    y = expression("Surface Rate of Spread (m min"^-1*")"),
+    color = "Invasion Status"
+  ) +
+  scale_color_manual(values = c("Non-Invaded" = "#1b9e77", "Invaded" = "#d95f02")) +
+  scale_y_continuous(limits = c(0, NA), expand = expansion(mult = c(0, 0.3))) +
+  theme_minimal(base_size = 16) +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.y = element_line(color = "gray85", linetype = "dashed"),
+    legend.position = "none"
+  )
+
+# Conditional effects for the Status:Season interaction
+ce_interaction <- conditional_effects(S_ROS_model_student, effects = "Status:Season")
+df_interaction <- ce_interaction[["Status:Season"]]
+# Relevel the status factor
+df_interaction$Status <- factor(df_interaction$Status,
+                                levels = c("Non_Invaded", "Invaded"))
+# Relevel the season factor                             
+df_interaction$Season <- factor(df_interaction$Season,
+                                levels = c("Spring", "Summer", "Winter"))
+
+ggplot(df_interaction, aes(x = Status, y = estimate__, color = Season, group = Season)) +
+  geom_errorbar(aes(ymin = lower__, ymax = upper__),
+                position = position_dodge(width = 0.3),
+                width = 0.2, size = 1) +
+  geom_point(position = position_dodge(width = 0.3), size = 4) +
+  labs(
+    title = "",
+    x = "Invasion Status",
+    y = expression("Surface Rate of Spread (m / min"^-1*")"),
+    color = "Season"
+  ) +
+  scale_color_manual(values = c("#1b9e77", "#d95f02", "#7570b3")) +
+  scale_y_continuous(limits = c(0, NA), expand = expansion(mult = c(0, 0.3))) +
+  theme_minimal(base_size = 16) +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.y = element_line(color = "gray85", linetype = "dashed"),
+    legend.position = "bottom" # Place legend at the bottom
+  )
+```
+
+## Estimated Marginal Means for Surface Rate of Spread
+```{r emmeans_S_ROS, echo=FALSE}
+emm_SROS <- emmeans(S_ROS_model_student, specs = ~ Status | Season)
+
+print(emm_SROS)
+
+pairwise_SROS <- pairs(emm_SROS, reverse = TRUE)
+
+print(pairwise_SROS)
+
+# exact posterior probability
+SROS_pp <- p_direction(pairwise_SROS)
+
+print(SROS_pp)
+
+# Convert the emmeans comparison object to a standard data frame
+pairwise_SROS_df <- as.data.frame(pairwise_SROS)
+
+# Find the full range of the data in your error bars
+min_limit <- min(pairwise_SROS_df$lower.HPD)
+max_limit <- max(pairwise_SROS_df$upper.HPD)
+
+# Define a padding amount
+padding <- 0.5 
+
+# Now, create the plot
+ggplot(pairwise_SROS_df, aes(x = estimate, y = Season)) +
+  # Add a vertical line at 0, which represents "no difference"
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey50") +
+  
+  # Add the error bars representing the 95% HPD interval
+  geom_errorbarh(aes(xmin = lower.HPD, xmax = upper.HPD), 
+                 height = 0.1, size = 1, color = "#FA4616") +
+                 
+  # Add a point for the median estimate
+  geom_point(size = 4, color = "#FA4616") +
+  
+  # Clean up labels and theme
+  labs(
+    x = expression("Estimated Difference in Surface Rate of Spread (m min"^-1*")"),
+    y = "Season"
+  ) +
+  theme_minimal(base_size = 14) +
+  
+  # ADD THIS LINE: Use the calculated limits with padding
+  coord_cartesian(xlim = c(min_limit - padding, max_limit + padding))
+```
+
+## Estimated Marginal Means Table
+```{r emmeans_S_ROS_table, echo=FALSE}
+# Convert emmeans to data frame
+emm_SROS_df <- as.data.frame(emm_SROS)
+
+# Clean up for table display
+emm_SROS_table <- emm_SROS_df |>
+  dplyr::select(
+    Season,
+    Status,
+    emmean,
+    lower.HPD,
+    upper.HPD
+  ) |>
+  dplyr::rename(
+    `Estimated Mean` = emmean,
+    `Lower 95% HPD`  = lower.HPD,
+    `Upper 95% HPD`  = upper.HPD
+  )
+
+emm_SROS_table
+
+# Convert contrasts to data frame
+pairwise_SROS_df <- as.data.frame(pairwise_SROS)
+
+# Add posterior probability
+pairwise_SROS_table <- pairwise_SROS_df |>
+  dplyr::mutate(
+    Pd = SROS_pp$pd
+  ) |>
+  dplyr::select(
+    Season,
+    contrast,
+    estimate,
+    lower.HPD,
+    upper.HPD,
+    Pd
+  ) |>
+  dplyr::rename(
+    `Contrast`        = contrast,
+    `Estimated Diff` = estimate,
+    `Lower 95% HPD`  = lower.HPD,
+    `Upper 95% HPD`  = upper.HPD,
+    `Pd`             = Pd
+  )
+
+pairwise_SROS_table
+
+
+combined_SROS_table <- left_join(
+  emm_SROS_table,
+  pairwise_SROS_table,
+  by = "Season"
+)
+
+combined_SROS_table
+
+pairwise_SROS_table |>
+  gt() |>
+  tab_header(
+    title = "Pairwise Contrasts of Surface Rate of Spread",
+    subtitle = "Estimated marginal means comparisons by season"
+  ) |>
+  fmt_number(
+    columns = c(`Estimated Diff`, `Lower 95% HPD`, `Upper 95% HPD`),
+    decimals = 2
+  ) |>
+  fmt_number(
+    columns = Pd,
+    decimals = 3
+  ) |>
+  cols_label(
+    Pd = "Pd"
+  )
+
+# Save
+gtsave(
+  pairwise_SROS_table %>%
+    gt() %>%
+    tab_header(
+      title = "Pairwise Contrasts of Surface Rate of Spread",
+      subtitle = "Estimated marginal means comparisons by season"
+    ) %>%
+    fmt_number(
+      columns = c(`Estimated Diff`, `Lower 95% HPD`, `Upper 95% HPD`),
+      decimals = 2
+    ) %>%
+    fmt_number(
+      columns = Pd,
+      decimals = 3
+    ) %>%
+    cols_label(
+      Pd = "Pd"
+    ),
+  "C:/Users/DrewIvory/OneDrive - University of Florida/Desktop/School/PHD/01_Projects/01_FuelDynamics/02_Data/Posterior_Probabilities/Seasonal_S_ROS_Emmeans_Contrasts_Table.rtf"
+)
+
+```
+
+
+
+## GLMM Flame Length
+```{r GLMM_Sur_FL, include=FALSE}
+fb$Status <- relevel(factor(fb$Status), ref = "Non_Invaded")
+
+S_FL_model_student <- brm(S_FL ~
+                             Status * Season,
+                          data = fb,
+                           family = student(),
+                           prior = priors,
+                           chains = 4,
+                           iter = 4000,
+                           warmup = 1000,
+                           control = list(adapt_delta = 0.95)
+                           )
+
+```
+
+## Flame Length Model Comparison
+```{r compare_S_FL, echo=FALSE}
+summary(S_FL_model_student)
+
+# Plot the posterior predictive checks
+pp_check(S_FL_model_student) +
+  labs(title = "Posterior Predictive Check for Surface Flame Length Model") +
+  theme_minimal()
+
+# Plot the relationship between invasion status and surface rate of spread
+fb %>%
+  ggplot(aes(x = Status, y = S_FL)) +
+  geom_boxplot() +
+  geom_jitter(width = 0.2, alpha = 0.2) +
+  labs(title = "Surface Flame Length by Invasion Status",
+       x = "Invasion Status",
+       y = "Surface Flame Length (m)") +
+  theme_minimal()
+
+ggplot(fb, aes(x = Status, y = S_FL, fill = Season)) +
+  geom_boxplot() +
+  geom_jitter(position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.75),
+              alpha = 0.05,
+              shape = 16) + # Using a solid circle shape
+  labs(title = "Surface Flame Length by Invasion Status and Season",
+       x = "Invasion Status",
+       y = "Surface Flame Length (m)",
+       fill = "Season") +
+  theme_minimal() +
+  scale_fill_viridis_d()
+```
+
+## Surface Flame Length Table
+```{r surface_flame_length_table, echo=FALSE}
+# --- 2. Extract draws and filter for parameters of interest ---
+sfl_draws_filtered <- as_draws_df(S_FL_model_student) %>%
+  select(starts_with("b_"))
+
+# --- 3. Calculate diagnostics ---
+sfl_diagnostics <- summarise_draws(
+  sfl_draws_filtered,
+  "R-hat" = rhat,
+  "Bulk ESS" = ess_bulk,
+  "Tail ESS" = ess_tail
+)
+
+# --- 4. Calculate estimates and HPDIs ---
+sfl_estimates <- sfl_draws_filtered %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = "variable",
+    values_to = "value"
+  ) %>%
+  group_by(variable) %>%
+  summarise(
+    Estimate = median(value),
+    `Est. Error` = mad(value),
+    HPDI_lower = hdi(value, ci = 0.95)$CI_low,
+    HPDI_upper = hdi(value, ci = 0.95)$CI_high,
+  `Pd` = max(mean(value > 0), mean(value < 0)),
+    .groups = "drop"
+  )
+
+# --- 5. Join the estimates and diagnostics into one table ---
+sfl_summary_df <- left_join(sfl_estimates, sfl_diagnostics, by = "variable")
+
+# --- 6. Clean and format the summary data frame ---
+sfl_summary_df_cleaned <- sfl_summary_df %>%
+  mutate(
+    Parameter = gsub("b_", "", variable),
+    Parameter = gsub("StatusInvaded", "Status-Invaded", Parameter),
+    Parameter = gsub("SeasonSummer", "Season-Summer", Parameter),
+    Parameter = gsub("SeasonWinter", "Season-Winter", Parameter),
+    Parameter = gsub(":", " x ", Parameter)
+  ) %>%
+  select(
+    Parameter,
+    Estimate,
+    `Est. Error`,
+    `HPDI_lower`,
+    `HPDI_upper`,
+    `Pd`,
+    `Bulk ESS`,
+    `Tail ESS`,
+    `R-hat`
+  ) %>%
+  mutate(Parameter = fct_relevel(Parameter, "Intercept")) %>%
+  arrange(Parameter) %>%
+  rename(
+    `95% HPDI (Lower)` = `HPDI_lower`,
+    `95% HPDI (Upper)` = `HPDI_upper`
+  )
+
+# --- 7. Create the final gt table ---
+sfl_gt_table <- sfl_summary_df_cleaned %>%
+  mutate(Significant = Pd >= 0.95) %>%
+  gt(rowname_col = "Parameter") %>%
+  fmt_number(
+    columns = c("Estimate", "Est. Error", "95% HPDI (Lower)", "95% HPDI (Upper)"),
+    decimals = 2
+  ) %>%
+  fmt_number(
+    columns = c("Pd", "R-hat"),
+    decimals = 3
+  ) %>%
+  fmt_number(
+    columns = c("Bulk ESS", "Tail ESS"),
+    decimals = 0,
+    use_seps = TRUE
+  ) %>%
+  tab_style(
+    style = cell_text(weight = "bold"),
+    locations = cells_body(
+      rows = Significant == TRUE
+    )
+  ) %>%
+  cols_hide(columns = "Significant") %>%
+  tab_header(title = "Posterior Estimates for Surface Flame Length")
+
+# Print the table
+print(sfl_gt_table)
+
+# Save the final table to a Word document
+gtsave(
+  sfl_gt_table, 
+  "C:/Users/DrewIvory/OneDrive - University of Florida/Desktop/School/PHD/01_Projects/01_FuelDynamics/02_Data/Posterior_Probabilities/Seasonal_S_FL_Posterior_Table.docx"
+)
+```
+
+
+## Flame Length Conditional Effects
+```{r conditional_effects_S_FL, echo=FALSE}
+# Calculate conditional effects and extract the data frame
+SFL_ce_Status <- conditional_effects(S_FL_model_student, effects = "Status")
+SFL_df_Status <- SFL_ce_Status[["Status"]]
+
+# Re-level the factor for plotting
+SFL_df_Status$Status <- factor(SFL_df_Status$Status,
+                                levels = c("Non_Invaded", "Invaded"),
+                                labels = c("Non-Invaded", "Invaded"))
+
+# Plot
+ggplot(SFL_df_Status, aes(x = Status, y = estimate__, color = Status)) +
+  # Add points for the mean estimates
+  geom_point(size = 4) +
+  # Add error bars for the 95% credible interval
+  geom_errorbar(aes(ymin = lower__, ymax = upper__), 
+                width = 0.15, size = 1) +
+  labs(
+    title = "Estimated Surface Flame Length by Invasion Status",
+    x = "Invasion Status",
+    y = expression("Surface Flame Length (m)"),
+    color = "Invasion Status"
+  ) +
+  scale_color_manual(values = c("Non-Invaded" = "#1b9e77", "Invaded" = "#d95f02")) +
+  scale_y_continuous(limits = c(0, NA), expand = expansion(mult = c(0, 0.3))) +
+  theme_minimal(base_size = 16) +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.y = element_line(color = "gray85", linetype = "dashed"),
+    legend.position = "none"
+  )
+
+
+# Conditional effects for the Status:Season interaction
+ce_interaction <- conditional_effects(S_FL_model_student, effects = "Status:Season")
+df_interaction <- ce_interaction[["Status:Season"]]
+# Relevel the status factor
+df_interaction$Status <- factor(df_interaction$Status,
+                                levels = c("Non_Invaded", "Invaded"))
+# Relevel the season factor                             
+df_interaction$Season <- factor(df_interaction$Season,
+                                levels = c("Spring", "Summer", "Winter"))
+
+ggplot(df_interaction, aes(x = Status, y = estimate__, color = Season, group = Season)) +
+  geom_errorbar(aes(ymin = lower__, ymax = upper__),
+                position = position_dodge(width = 0.3),
+                width = 0.2, size = 1) +
+  geom_point(position = position_dodge(width = 0.3), size = 4) +
+  labs(
+    title = "",
+    x = "Invasion Status",
+    y = expression("Surface Flame Length (m)"),
+    color = "Season"
+  ) +
+  scale_color_manual(values = c("#1b9e77", "#d95f02", "#7570b3")) +
+  scale_y_continuous(limits = c(0, NA), expand = expansion(mult = c(0, 0.3))) +
+  theme_minimal(base_size = 16) +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.y = element_line(color = "gray85", linetype = "dashed"),
+    legend.position = "bottom" # Place legend at the bottom
+  )
+```
+
+## Estimated Marginal Means for Surface Flame Length
+```{r emmeans_S_FL, echo=FALSE}
+emm_SFL <- emmeans(S_FL_model_student, specs = ~ Status | Season)
+
+print(emm_SFL)
+
+pairwise_SFL <- pairs(emm_SFL, reverse = TRUE)
+
+print(pairwise_SFL)
+
+# exact posterior probability
+SFL_pp <- p_direction(pairwise_SFL)
+
+print(SFL_pp)
+
+# Convert the emmeans comparison object to a standard data frame
+pairwise_SFL_df <- as.data.frame(pairwise_SFL)
+
+# Find the full range of the data in your error bars
+min_limit <- min(pairwise_SFL_df$lower.HPD)
+max_limit <- max(pairwise_SFL_df$upper.HPD)
+
+# Define a padding amount
+padding <- 0.5 
+
+# Now, create the plot
+ggplot(pairwise_SFL_df, aes(x = estimate, y = Season)) +
+  # Add a vertical line at 0, which represents "no difference"
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey50") +
+  
+  # Add the error bars representing the 95% HPD interval
+  geom_errorbarh(aes(xmin = lower.HPD, xmax = upper.HPD), 
+                 height = 0.1, size = 1, color = "#FA4616") +
+                 
+  # Add a point for the median estimate
+  geom_point(size = 4, color = "#FA4616") +
+  
+  # Clean up labels and theme
+  labs(
+    x = expression("Estimated Difference in Surface Flame Length (m)"),
+    y = "Season"
+  ) +
+  theme_minimal(base_size = 14) +
+  
+  # ADD THIS LINE: Use the calculated limits with padding
+  coord_cartesian(xlim = c(min_limit - padding, max_limit + padding))
+```
+## Estimated Marginal Means Table
+```{r emmeans_S_FL_table, echo=FALSE}
+# Convert emmeans to data frame
+emm_SFL_df <- as.data.frame(emm_SFL)
+
+# Clean up for table display
+emm_SFL_table <- emm_SFL_df |>
+  dplyr::select(
+    Season,
+    Status,
+    emmean,
+    lower.HPD,
+    upper.HPD
+  ) |>
+  dplyr::rename(
+    `Estimated Mean` = emmean,
+    `Lower 95% HPD`  = lower.HPD,
+    `Upper 95% HPD`  = upper.HPD
+  )
+
+emm_SFL_table
+
+# Convert contrasts to data frame
+pairwise_SFL_df <- as.data.frame(pairwise_SFL)
+
+# Add posterior probability
+pairwise_SFL_table <- pairwise_SFL_df |>
+  dplyr::mutate(
+    Pd = SFL_pp$pd
+  ) |>
+  dplyr::select(
+    Season,
+    contrast,
+    estimate,
+    lower.HPD,
+    upper.HPD,
+    Pd
+  ) |>
+  dplyr::rename(
+    `Contrast`        = contrast,
+    `Estimated Diff` = estimate,
+    `Lower 95% HPD`  = lower.HPD,
+    `Upper 95% HPD`  = upper.HPD,
+    `Pd`             = Pd
+  )
+
+pairwise_SFL_table
+
+
+combined_SFL_table <- left_join(
+  emm_SFL_table,
+  pairwise_SFL_table,
+  by = "Season"
+)
+
+combined_SFL_table
+
+pairwise_SFL_table |>
+  gt() |>
+  tab_header(
+    title = "Pairwise Contrasts of Surface Flame Length",
+    subtitle = "Estimated marginal means comparisons by season"
+  ) |>
+  fmt_number(
+    columns = c(`Estimated Diff`, `Lower 95% HPD`, `Upper 95% HPD`),
+    decimals = 2
+  ) |>
+  fmt_number(
+    columns = Pd,
+    decimals = 3
+  ) |>
+  cols_label(
+    Pd = "Pd"
+  )
+
+# Save
+gtsave(
+  pairwise_SFL_table %>%
+    gt() %>%
+    tab_header(
+      title = "Pairwise Contrasts of Surface Flame Length",
+      subtitle = "Estimated marginal means comparisons by season"
+    ) %>%
+    fmt_number(
+      columns = c(`Estimated Diff`, `Lower 95% HPD`, `Upper 95% HPD`),
+      decimals = 2
+    ) %>%
+    fmt_number(
+      columns = Pd,
+      decimals = 3
+    ) %>%
+    cols_label(
+      Pd = "Pd"
+    ),
+  "C:/Users/DrewIvory/OneDrive - University of Florida/Desktop/School/PHD/01_Projects/01_FuelDynamics/02_Data/Posterior_Probabilities/Seasonal_S_FL_Emmeans_Contrasts_Table.rtf"
+)
+
+```
+
+## GLMM Surface Fireline Intensity
+```{r GLMM_Sur_FI, include=FALSE}
+fb$Status <- relevel(factor(fb$Status), ref = "Non_Invaded")
+
+S_Fin_model_student <- brm(S_Fin ~
+                             Status * Season,
+                           data = fb,
+                           family = student(),
+                           prior = priors,
+                           chains = 4,
+                           iter = 4000,
+                           warmup = 1000,
+                           control = list(adapt_delta = 0.95)
+                           )
+
+S_Fin_model_nonI <- brm(S_Fin ~
+                             Status + Season,
+                           data = fb,
+                           family = student(),
+                           prior = priors,
+                           chains = 4,
+                           iter = 4000,
+                           warmup = 1000,
+                           control = list(adapt_delta = 0.95)
+                           )
+
+```
+
+
+## Fireline Intensity Model Comparison
+```{r compare_S_FI, echo=FALSE}
+summary(S_Fin_model_student)
+summary(S_Fin_model_nonI)
+
+# Plot the posterior predictive checks
+pp_check(S_Fin_model_student) +
+  labs(title = "Posterior Predictive Check for Surface Fireline Intensity Model") +
+  theme_minimal()
+
+# Plot the relationship between invasion status and surface rate of spread
+fb %>%
+  ggplot(aes(x = Status, y = S_Fin)) +
+  geom_boxplot() +
+  geom_jitter(width = 0.2, alpha = 0.2) +
+  labs(title = "Surface Fireline Intensity by Invasion Status",
+       x = "Invasion Status",
+       y = "Surface Fireline Intensity (kW/m)") +
+  theme_minimal()
+
+ggplot(fb, aes(x = Status, y = S_Fin, fill = Season)) +
+  geom_boxplot() +
+  geom_jitter(position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.75),
+              alpha = 0.05,
+              shape = 16) + # Using a solid circle shape
+  labs(title = "Surface Rate of Spread by Invasion Status and Season",
+       x = "Invasion Status",
+       y = "Surface Fireline Intensity (kW/m)",
+       fill = "Season") +
+  theme_minimal() +
+  scale_fill_viridis_d()
+
+```
+
+## Surface Fireline Intensity Table
+```{r surface_fireline_intensity_table, echo=FALSE}
+# --- 2. Extract draws and filter for parameters of interest ---
+sfin_draws_filtered <- as_draws_df(S_Fin_model_student) %>%
+  select(starts_with("b_"))
+
+# --- 3. Calculate diagnostics ---
+sfin_diagnostics <- summarise_draws(
+  sfin_draws_filtered,
+  "R-hat" = rhat,
+  "Bulk ESS" = ess_bulk,
+  "Tail ESS" = ess_tail
+)
+
+# --- 4. Calculate estimates and HPDIs ---
+sfin_estimates <- sfin_draws_filtered %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = "variable",
+    values_to = "value"
+  ) %>%
+  group_by(variable) %>%
+  summarise(
+    Estimate = median(value),
+    `Est. Error` = mad(value),
+    HPDI_lower = hdi(value, ci = 0.95)$CI_low,
+    HPDI_upper = hdi(value, ci = 0.95)$CI_high,
+    `Pd` = max(mean(value > 0), mean(value < 0)),
+    .groups = "drop"
+  )
+
+# --- 5. Join the estimates and diagnostics into one table ---
+sfin_summary_df <- left_join(sfin_estimates, sfin_diagnostics, by = "variable")
+
+# --- 6. Clean and format the summary data frame ---
+sfin_summary_df_cleaned <- sfin_summary_df %>%
+  mutate(
+    Parameter = gsub("b_", "", variable),
+    Parameter = gsub("StatusInvaded", "Status-Invaded", Parameter),
+    Parameter = gsub("SeasonSummer", "Season-Summer", Parameter),
+    Parameter = gsub("SeasonWinter", "Season-Winter", Parameter),
+    Parameter = gsub(":", " x ", Parameter)
+  ) %>%
+  select(
+    Parameter,
+    Estimate,
+    `Est. Error`,
+    `HPDI_lower`,
+    `HPDI_upper`,
+    `Pd`,
+    `Bulk ESS`,
+    `Tail ESS`,
+    `R-hat`
+  ) %>%
+  mutate(Parameter = fct_relevel(Parameter, "Intercept")) %>%
+  arrange(Parameter) %>%
+  rename(
+    `95% HPDI (Lower)` = `HPDI_lower`,
+    `95% HPDI (Upper)` = `HPDI_upper`
+  )
+
+# --- 7. Create the final gt table ---
+sfin_gt_table <- sfin_summary_df_cleaned %>%
+  mutate(Significant = Pd >= 0.95) %>%
+  gt(rowname_col = "Parameter") %>%
+  fmt_number(
+    columns = c("Estimate", "Est. Error", "95% HPDI (Lower)", "95% HPDI (Upper)"),
+    decimals = 2
+  ) %>%
+  fmt_number(
+    columns = c("Pd", "R-hat"),
+    decimals = 3
+  ) %>%
+  fmt_number(
+    columns = c("Bulk ESS", "Tail ESS"),
+    decimals = 0,
+    use_seps = TRUE
+  ) %>%
+  tab_style(
+    style = cell_text(weight = "bold"),
+    locations = cells_body(
+      rows = Significant == TRUE
+    )
+  ) %>%
+  cols_hide(columns = "Significant") %>%
+  tab_header(title = "Posterior Estimates for Surface Fireline Intensity")
+
+# Print the table
+print(sfin_gt_table)
+
+# Save the final table to a Word document
+gtsave(
+  sfin_gt_table, 
+  "C:/Users/DrewIvory/OneDrive - University of Florida/Desktop/School/PHD/01_Projects/01_FuelDynamics/02_Data/Posterior_Probabilities/Seasonal_S_Fin_Posterior_Table.docx"
+)
+```
+
+## Summary Table Fireline Intensity- nonI
+```{r S_FI_nonI_summary, echo=FALSE}
+# --- 2. Extract draws and filter for parameters of interest ---
+sfin_nonI_draws_filtered <- as_draws_df(S_Fin_model_nonI) %>%
+  select(starts_with("b_"))
+
+# --- 3. Calculate diagnostics ---
+sfin_nonI_diagnostics <- summarise_draws(
+  sfin_nonI_draws_filtered,
+  "R-hat" = rhat,
+  "Bulk ESS" = ess_bulk,
+  "Tail ESS" = ess_tail
+)
+
+# --- 4. Calculate estimates and HPDIs ---
+sfin_nonI_estimates <- sfin_nonI_draws_filtered %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = "variable",
+    values_to = "value"
+  ) %>%
+  group_by(variable) %>%
+  summarise(
+    Estimate = median(value),
+    `Est. Error` = mad(value),
+    HPDI_lower = hdi(value, ci = 0.95)$CI_low,
+    HPDI_upper = hdi(value, ci = 0.95)$CI_high,
+    `Pd` = max(mean(value > 0), mean(value < 0)),
+    .groups = "drop"
+  )
+
+# --- 5. Join the estimates and diagnostics into one table ---
+sfin_nonI_summary_df <- left_join(sfin_nonI_estimates, sfin_nonI_diagnostics, by = "variable")
+# --- 6. Clean and format the summary data frame ---
+sfin_nonI_summary_df_cleaned <- sfin_nonI_summary_df %>%
+  mutate(
+    Parameter = gsub("b_", "", variable),
+    Parameter = gsub("StatusInvaded", "Status-Invaded", Parameter),
+    Parameter = gsub("SeasonSummer", "Season-Summer", Parameter),
+    Parameter = gsub("SeasonWinter", "Season-Winter", Parameter)
+  ) %>%
+  select(
+    Parameter,
+    Estimate,
+    `Est. Error`,
+    `HPDI_lower`,
+    `HPDI_upper`,
+    `Pd`,
+    `Bulk ESS`,
+    `Tail ESS`,
+    `R-hat`
+  ) %>%
+  mutate(Parameter = fct_relevel(Parameter, "Intercept")) %>%
+  arrange(Parameter) %>%
+  rename(
+    `95% HPDI (Lower)` = `HPDI_lower`,
+    `95% HPDI (Upper)` = `HPDI_upper`
+  )
+
+# --- 7. Create the final gt table ---
+sfin_nonI_gt_table <- sfin_nonI_summary_df_cleaned %>%
+  mutate(Significant = Pd >= 0.95) %>%
+  gt(rowname_col = "Parameter") %>%
+  fmt_number(
+    columns = c("Estimate", "Est. Error", "95% HPDI (Lower)", "95% HPDI (Upper)"),
+    decimals = 2
+  ) %>%
+  fmt_number(
+    columns = c("Pd", "R-hat"),
+    decimals = 3
+  ) %>%
+  fmt_number(
+    columns = c("Bulk ESS", "Tail ESS"),
+    decimals = 0,
+    use_seps = TRUE
+  ) %>%
+  tab_style(
+    style = cell_text(weight = "bold"),
+    locations = cells_body(
+      rows = Significant == TRUE
+    )
+  ) %>%
+  cols_hide(columns = "Significant") %>%
+  tab_header(title = "Posterior Estimates for Surface Fireline Intensity (No Interaction)")
+
+# Print the table
+print(sfin_nonI_gt_table)
+
+# Save the final table to a Word document
+gtsave(
+  sfin_nonI_gt_table, 
+  "C:/Users/DrewIvory/OneDrive - University of Florida/Desktop/School/PHD/01_Projects/01_FuelDynamics/02_Data/Posterior_Probabilities/Seasonal_S_Fin_nonI_Posterior_Table.rtf"
+)
+
+```
+
+
+
+## Fireline Intensity Conditional Effects
+```{r conditional_effects_S_FI, echo=FALSE}
+# Calculate conditional effects and extract the data frame
+SFin_ce_Status <- conditional_effects(S_Fin_model_student, effects = "Status")
+SFin_df_Status <- SFin_ce_Status[["Status"]]
+
+# Re-level the factor for plotting
+SFin_df_Status$Status <- factor(SFin_df_Status$Status,
+                                levels = c("Non_Invaded", "Invaded"),
+                                labels = c("Non-Invaded", "Invaded"))
+
+# Plot
+ggplot(SFin_df_Status, aes(x = Status, y = estimate__, color = Status)) +
+  # Add points for the mean estimates
+  geom_point(size = 4) +
+  # Add error bars for the 95% credible interval
+  geom_errorbar(aes(ymin = lower__, ymax = upper__), 
+                width = 0.15, size = 1) +
+  labs(
+    title = "Estimated Surface Fireline Intensity by Invasion Status",
+    x = "Invasion Status",
+    y = expression("Surface Fireline Intensity (kW/m)"),
+    color = "Invasion Status"
+  ) +
+  scale_color_manual(values = c("Non-Invaded" = "#1b9e77", "Invaded" = "#d95f02")) +
+  scale_y_continuous(limits = c(0, NA), expand = expansion(mult = c(0, 0.3))) +
+  theme_minimal(base_size = 16) +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.y = element_line(color = "gray85", linetype = "dashed"),
+    legend.position = "none"
+  )
+
+# Conditional effects for the Status:Season interaction
+ce_interaction <- conditional_effects(S_Fin_model_student, effects = "Status:Season")
+df_interaction <- ce_interaction[["Status:Season"]]
+# Relevel the status factor
+df_interaction$Status <- factor(df_interaction$Status,
+                                levels = c("Non_Invaded", "Invaded"))
+# Relevel the season factor                             
+df_interaction$Season <- factor(df_interaction$Season,
+                                levels = c("Spring", "Summer", "Winter"))
+
+ggplot(df_interaction, aes(x = Status, y = estimate__, color = Season, group = Season)) +
+  geom_errorbar(aes(ymin = lower__, ymax = upper__),
+                position = position_dodge(width = 0.3),
+                width = 0.2, size = 1) +
+  geom_point(position = position_dodge(width = 0.3), size = 4) +
+  labs(
+    title = "",
+    x = "Invasion Status",
+    y = expression("Surface Fireline Intensity (kW / m"^-1*")"),
+    color = "Season"
+  ) +
+  scale_color_manual(values = c("#1b9e77", "#d95f02", "#7570b3")) +
+  scale_y_continuous(limits = c(0, NA), expand = expansion(mult = c(0, 0.3))) +
+  theme_minimal(base_size = 16) +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.y = element_line(color = "gray85", linetype = "dashed"),
+    legend.position = "bottom" # Place legend at the bottom
+  )
+```
+
+## Estimated Marginal Means for Surface Fireline Intensity
+```{r emmeans_S_Fin, echo=FALSE}
+emm_SFin <- emmeans(S_Fin_model_student, specs = ~ Status | Season)
+
+emm_SFin_df <- as.data.frame(emm_SFin)
+
+emm_SFin_df <- emm_SFin_df %>%
+  mutate(across(c(emmean, lower.HPD, upper.HPD), ~ round(.x, 2)))
+
+print(emm_SFin_df)
+
+pairwise_SFin <- pairs(emm_SFin, reverse = TRUE) 
+
+pairwise_SFin_df <- as.data.frame(pairwise_SFin)
+
+pairwise_SFin_df <- pairwise_SFin_df %>%
+  mutate(across(c(estimate, lower.HPD, upper.HPD), ~ round(.x, 2)))
+  
+print(pairwise_SFin_df)
+
+SFin_pp <- p_direction(pairwise_SFin) 
+
+SFin_pp <- SFin_pp %>%
+  mutate(pd = sprintf("%.2f", pd)) %>%
+  rename(`Posterior Probability` = pd)
+
+print(SFin_pp)
+
+# Find the full range of the data in your error bars
+min_limit <- min(pairwise_SFin_df$lower.HPD)
+max_limit <- max(pairwise_SFin_df$upper.HPD)
+
+# Define a padding amount
+padding <- 0.5 
+
+# Now, create the plot
+ggplot(pairwise_SFin_df, aes(x = estimate, y = Season)) +
+  # Add a vertical line at 0, which represents "no difference"
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey50") +
+  
+  # Add the error bars representing the 95% HPD interval
+  geom_errorbarh(aes(xmin = lower.HPD, xmax = upper.HPD), 
+                 height = 0.1, size = 1, color = "#FA4616") +
+                 
+  # Add a point for the median estimate
+  geom_point(size = 4, color = "#FA4616") +
+  
+  # Clean up labels and theme
+  labs(
+    x = expression("Estimated Difference in Surface Fireline Intensity (kW m"^-1*")"),
+    y = "Season"
+  ) +
+  theme_minimal(base_size = 14) +
+  
+  # ADD THIS LINE: Use the calculated limits with padding
+  coord_cartesian(xlim = c(min_limit - padding, max_limit + padding))
+```
+
+
+## Estimated Marginal Means Table
+```{r emmeans_S_Fin_table, echo=FALSE}
+# Convert emmeans to data frame
+emm_SFin_df <- as.data.frame(emm_SFin)
+
+# Clean up for table display
+emm_SFin_table <- emm_SFin_df |>
+  dplyr::select(
+    Season,
+    Status,
+    emmean,
+    lower.HPD,
+    upper.HPD
+  ) |>
+  dplyr::rename(
+    `Estimated Mean` = emmean,
+    `Lower 95% HPD`  = lower.HPD,
+    `Upper 95% HPD`  = upper.HPD
+  )
+
+emm_SFin_table
+
+# Convert contrasts to data frame
+pairwise_SFin_df <- as.data.frame(pairwise_SFin)
+
+# Add posterior probability
+pairwise_SFin_table <- pairwise_SFin_df |>
+  dplyr::mutate(
+    Pd = SFin_pp$`Posterior Probability`
+  ) |>
+  dplyr::select(
+    Season,
+    contrast,
+    estimate,
+    lower.HPD,
+    upper.HPD,
+    Pd
+  ) |>
+  dplyr::rename(
+    `Contrast`        = contrast,
+    `Estimated Diff` = estimate,
+    `Lower 95% HPD`  = lower.HPD,
+    `Upper 95% HPD`  = upper.HPD,
+    `Pd`             = Pd
+  )
+
+pairwise_SFin_table
+
+
+combined_SFin_table <- left_join(
+  emm_SROS_table,
+  pairwise_SFin_table,
+  by = "Season"
+)
+
+combined_SFin_table
+
+pairwise_SFin_table |>
+  gt() |>
+  tab_header(
+    title = "Pairwise Contrasts of Surface Fireline Intensity",
+    subtitle = "Estimated marginal means comparisons by season"
+  ) |>
+  fmt_number(
+    columns = c(`Estimated Diff`, `Lower 95% HPD`, `Upper 95% HPD`),
+    decimals = 2
+  ) |>
+  fmt_number(
+    columns = Pd,
+    decimals = 3
+  ) |>
+  cols_label(
+    Pd = "Pd"
+  )
+
+# Save
+gtsave(
+  pairwise_SFin_table %>%
+    gt() %>%
+    tab_header(
+      title = "Pairwise Contrasts of Surface Fireline Intensity",
+      subtitle = "Estimated marginal means comparisons by season"
+    ) %>%
+    fmt_number(
+      columns = c(`Estimated Diff`, `Lower 95% HPD`, `Upper 95% HPD`),
+      decimals = 2
+    ) %>%
+    fmt_number(
+      columns = Pd,
+      decimals = 3
+    ) %>%
+    cols_label(
+      Pd = "Pd"
+    ),
+  "C:/Users/DrewIvory/OneDrive - University of Florida/Desktop/School/PHD/01_Projects/01_FuelDynamics/02_Data/Posterior_Probabilities/Seasonal_S_Fin_Emmeans_Contrasts_Table.rtf"
+)
+
+```
+
+## GLMM Crown Transition Ratio
+```{r GLMM_Crown_Transition_Ratio, include=FALSE}
+fb$Status <- relevel(factor(fb$Status), ref = "Non_Invaded")
+
+C_TR_model_student <- brm(C_TR ~
+                             Status * Season,
+                          data = fb,
+                           family = student(),
+                           prior = priors,
+                           chains = 4,
+                           iter = 4000,
+                           warmup = 1000,
+                           control = list(adapt_delta = 0.95)
+                           )
+```
+
+## Crown Transition Ratio Model Comparison
+```{r compare_Crown_TR, echo=FALSE}
+summary(C_TR_model_student)
+
+# Plot the posterior predictive checks
+pp_check(C_TR_model_student) +
+  labs(title = "Posterior Predictive Check for Crown Fire Transition Ratio") +
+  theme_minimal()
+
+# Plot the relationship between invasion status and surface rate of spread
+fb %>%
+  ggplot(aes(x = Status, y = C_TR)) +
+  geom_boxplot() +
+  geom_jitter(width = 0.2, alpha = 0.2) +
+  labs(title = "Crown Fire Transition Ratio by Invasion Status",
+       x = "Invasion Status",
+       y = "Crown Fire Transition Ratio") +
+  theme_minimal()
+
+ggplot(fb, aes(x = Status, y = C_TR, fill = Season)) +
+  geom_boxplot() +
+  geom_jitter(position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.75),
+              alpha = 0.05,
+              shape = 16) + # Using a solid circle shape
+  labs(title = "Crown Transition Ratio by Invasion Status and Season",
+       x = "Invasion Status",
+       y = "Crown Transition Ratio",
+       fill = "Season") +
+  theme_minimal() +
+  scale_fill_viridis_d()
+```
+
+## Transition Ratio Table
+```{r transition_ratio_table, echo=FALSE}
+# --- 2. Extract draws and filter for parameters of interest ---
+ctr_draws_filtered <- as_draws_df(C_TR_model_student) %>%
+  select(starts_with("b_"))
+
+# --- 3. Calculate diagnostics ---
+ctr_diagnostics <- summarise_draws(
+  ctr_draws_filtered,
+  "R-hat" = rhat,
+  "Bulk ESS" = ess_bulk,
+  "Tail ESS" = ess_tail
+)
+
+# --- 4. Calculate estimates and HPDIs ---
+ctr_estimates <- ctr_draws_filtered %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = "variable",
+    values_to = "value"
+  ) %>%
+  group_by(variable) %>%
+  summarise(
+    Estimate = median(value),
+    `Est. Error` = mad(value),
+    HPDI_lower = hdi(value, ci = 0.95)$CI_low,
+    HPDI_upper = hdi(value, ci = 0.95)$CI_high,
+    `Pd` = max(mean(value > 0), mean(value < 0)),
+    .groups = "drop"
+  )
+
+# --- 5. Join the estimates and diagnostics into one table ---
+ctr_summary_df <- left_join(ctr_estimates, ctr_diagnostics, by = "variable")
+
+# --- 6. Clean and format the summary data frame ---
+ctr_summary_df_cleaned <- ctr_summary_df %>%
+  mutate(
+    Parameter = gsub("b_", "", variable),
+    Parameter = gsub("StatusInvaded", "Status-Invaded", Parameter),
+    Parameter = gsub("SeasonSummer", "Season-Summer", Parameter),
+    Parameter = gsub("SeasonWinter", "Season-Winter", Parameter),
+    Parameter = gsub(":", " x ", Parameter)
+  ) %>%
+  select(
+    Parameter,
+    Estimate,
+    `Est. Error`,
+    `HPDI_lower`,
+    `HPDI_upper`,
+    `Pd`,
+    `Bulk ESS`,
+    `Tail ESS`,
+    `R-hat`
+  ) %>%
+  mutate(Parameter = fct_relevel(Parameter, "Intercept")) %>%
+  arrange(Parameter) %>%
+  rename(
+    `95% HPDI (Lower)` = `HPDI_lower`,
+    `95% HPDI (Upper)` = `HPDI_upper`
+  )
+
+# --- 7. Create the final gt table ---
+ctr_gt_table <- ctr_summary_df_cleaned %>%
+  mutate(Significant = Pd >= 0.95) %>%
+  gt(rowname_col = "Parameter") %>%
+  fmt_number(
+    columns = c("Estimate", "Est. Error", "95% HPDI (Lower)", "95% HPDI (Upper)"),
+    decimals = 2
+  ) %>%
+  fmt_number(
+    columns = c("Pd", "R-hat"),
+    decimals = 3
+  ) %>%
+  fmt_number(
+    columns = c("Bulk ESS", "Tail ESS"),
+    decimals = 0,
+    use_seps = TRUE
+  ) %>%
+  tab_style(
+    style = cell_text(weight = "bold"),
+    locations = cells_body(
+      rows = Significant == TRUE
+    )
+  ) %>%
+  cols_hide(columns = "Significant") %>%
+  tab_header(title = "Posterior Estimates for Crown Transition Ratio")
+
+# Print the table
+print(ctr_gt_table)
+
+# Save the final table to a Word document
+gtsave(
+  ctr_gt_table, 
+  "C:/Users/DrewIvory/OneDrive - University of Florida/Desktop/School/PHD/01_Projects/01_FuelDynamics/02_Data/Posterior_Probabilities/Seasonal_C_TR_Posterior_Table.docx"
+)
+
+```
+
+
+## Crown Transition Ratio Conditional Effects
+```{r conditional_effects_Crown_TR, echo=FALSE}
+# Calculate conditional effects and extract the data frame
+CTR_ce_Status <- conditional_effects(C_TR_model_student, effects = "Status")
+CTR_df_Status <- CTR_ce_Status[["Status"]]
+
+# Re-level the factor for plotting
+CTR_df_Status$Status <- factor(CTR_df_Status$Status,
+                                levels = c("Non_Invaded", "Invaded"),
+                                labels = c("Non-Invaded", "Invaded"))
+
+# Plot
+ggplot(CTR_df_Status, aes(x = Status, y = estimate__, color = Status)) +
+  # Add points for the mean estimates
+  geom_point(size = 4) +
+  # Add error bars for the 95% credible interval
+  geom_errorbar(aes(ymin = lower__, ymax = upper__), 
+                width = 0.15, size = 1) +
+  labs(
+    title = "Estimated Crown Fire Transition Ratio by Invasion Status",
+    x = "Invasion Status",
+    y = expression("Crown Fire Transition Ratio"),
+    color = "Invasion Status"
+  ) +
+  scale_color_manual(values = c("Non-Invaded" = "#1b9e77", "Invaded" = "#d95f02")) +
+  scale_y_continuous(limits = c(0, NA), expand = expansion(mult = c(0, 0.3))) +
+  theme_minimal(base_size = 16) +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.y = element_line(color = "gray85", linetype = "dashed"),
+    legend.position = "none"
+  )
+
+# Conditional effects for the Status:Season interaction
+ce_interaction <- conditional_effects(C_TR_model_student, effects = "Status:Season")
+df_interaction <- ce_interaction[["Status:Season"]]
+# Relevel the status factor
+df_interaction$Status <- factor(df_interaction$Status,
+                                levels = c("Non_Invaded", "Invaded"))
+# Relevel the season factor                             
+df_interaction$Season <- factor(df_interaction$Season,
+                                levels = c("Spring", "Summer", "Winter"))
+
+ggplot(df_interaction, aes(x = Status, y = estimate__, color = Season, group = Season)) +
+  geom_errorbar(aes(ymin = lower__, ymax = upper__),
+                position = position_dodge(width = 0.3),
+                width = 0.2, size = 1) +
+  geom_point(position = position_dodge(width = 0.3), size = 4) +
+  labs(
+    title = "",
+    x = "Invasion Status",
+    y = expression("Crown Transition Ratio"),
+    color = "Season"
+  ) +
+  scale_color_manual(values = c("#1b9e77", "#d95f02", "#7570b3")) +
+  scale_y_continuous(limits = c(0, NA), expand = expansion(mult = c(0, 0.3))) +
+  theme_minimal(base_size = 16) +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.y = element_line(color = "gray85", linetype = "dashed"),
+    legend.position = "bottom" # Place legend at the bottom
+  )
+```
+
+## Estimated Marginal Means for Crown Transition Ratio
+```{r emmeans_C_TR, echo=FALSE}
+emm_CTR <- emmeans(C_TR_model_student, specs = ~ Status | Season)
+
+print(emm_CTR)
+
+pairwise_CTR <- pairs(emm_CTR, reverse = TRUE)
+
+print(pairwise_CTR)
+
+# exact posterior probability
+CTR_pp <- p_direction(pairwise_CTR)
+
+print(CTR_pp)
+
+# Convert the emmeans comparison object to a standard data frame
+pairwise_CTR_df <- as.data.frame(pairwise_CTR)
+
+# Find the full range of the data in your error bars
+min_limit <- min(pairwise_CTR_df$lower.HPD)
+max_limit <- max(pairwise_CTR_df$upper.HPD)
+
+# Define a padding amount
+padding <- 0.5 
+
+# Now, create the plot
+ggplot(pairwise_CTR_df, aes(x = estimate, y = Season)) +
+  # Add a vertical line at 0, which represents "no difference"
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey50") +
+  
+  # Add the error bars representing the 95% HPD interval
+  geom_errorbarh(aes(xmin = lower.HPD, xmax = upper.HPD), 
+                 height = 0.1, size = 1, color = "#FA4616") +
+                 
+  # Add a point for the median estimate
+  geom_point(size = 4, color = "#FA4616") +
+  
+  # Clean up labels and theme
+  labs(
+    x = expression("Estimated Difference in Crown Transition Ratio"),
+    y = "Season"
+  ) +
+  theme_minimal(base_size = 14) +
+  
+  # ADD THIS LINE: Use the calculated limits with padding
+  coord_cartesian(xlim = c(min_limit - padding, max_limit + padding))
+```
+
+## Estimated Marginal Means Table
+```{r emmeans_C_TR_table, echo=FALSE}
+# Convert emmeans to data frame
+emm_CTR_df <- as.data.frame(emm_CTR)
+
+# Clean up for table display
+emm_CTR_table <- emm_CTR_df |>
+  dplyr::select(
+    Season,
+    Status,
+    emmean,
+    lower.HPD,
+    upper.HPD
+  ) |>
+  dplyr::rename(
+    `Estimated Mean` = emmean,
+    `Lower 95% HPD`  = lower.HPD,
+    `Upper 95% HPD`  = upper.HPD
+  )
+
+emm_CTR_table
+
+# Convert contrasts to data frame
+pairwise_CTR_df <- as.data.frame(pairwise_CTR)
+
+# Add posterior probability
+pairwise_CTR_table <- pairwise_CTR_df |>
+  dplyr::mutate(
+    Pd = CTR_pp$pd
+  ) |>
+  dplyr::select(
+    Season,
+    contrast,
+    estimate,
+    lower.HPD,
+    upper.HPD,
+    Pd
+  ) |>
+  dplyr::rename(
+    `Contrast`        = contrast,
+    `Estimated Diff` = estimate,
+    `Lower 95% HPD`  = lower.HPD,
+    `Upper 95% HPD`  = upper.HPD,
+    `Pd`             = Pd
+  )
+
+pairwise_CTR_table
+
+
+combined_CTR_table <- left_join(
+  emm_CTR_table,
+  pairwise_CTR_table,
+  by = "Season"
+)
+
+combined_CTR_table
+
+pairwise_CTR_table |>
+  gt() |>
+  tab_header(
+    title = "Pairwise Contrasts of Crown Transition Ratio",
+    subtitle = "Estimated marginal means comparisons by season"
+  ) |>
+  fmt_number(
+    columns = c(`Estimated Diff`, `Lower 95% HPD`, `Upper 95% HPD`),
+    decimals = 2
+  ) |>
+  fmt_number(
+    columns = Pd,
+    decimals = 3
+  ) |>
+  cols_label(
+    Pd = "Pd"
+  )
+
+# Save
+gtsave(
+  pairwise_CTR_table %>%
+    gt() %>%
+    tab_header(
+      title = "Pairwise Contrasts of Crown Transition Ratio",
+      subtitle = "Estimated marginal means comparisons by season"
+    ) %>%
+    fmt_number(
+      columns = c(`Estimated Diff`, `Lower 95% HPD`, `Upper 95% HPD`),
+      decimals = 2
+    ) %>%
+    fmt_number(
+      columns = Pd,
+      decimals = 3
+    ) %>%
+    cols_label(
+      Pd = "Pd"
+    ),
+  "C:/Users/DrewIvory/OneDrive - University of Florida/Desktop/School/PHD/01_Projects/01_FuelDynamics/02_Data/Posterior_Probabilities/Seasonal_C_TR_Emmeans_Contrasts_Table.rtf"
+)
+
+```
+
+
+## GLMM Crown Fire Active Ratio
+```{r GLMM_Crown_Fire_Active_Ratio, include=FALSE}
+fb$Status <- relevel(factor(fb$Status), ref = "Non_Invaded")
+
+C_AR_model_student <- brm(C_AR ~
+                             Status * Season,
+                          data = fb,
+                           family = student(),
+                           prior = priors,
+                           chains = 4,
+                           iter = 4000,
+                           warmup = 1000,
+                           control = list(adapt_delta = 0.95)
+                           )
+
+```
+
+## Crown Fire Active Ratio Model Comparison
+```{r compare_Crown_AR, echo=FALSE}
+summary(C_AR_model_student)
+
+# Plot the posterior predictive checks
+pp_check(C_AR_model_student) +
+  labs(title = "Posterior Predictive Check for Crown Fire Active Ratio") +
+  theme_minimal()
+
+# Plot the relationship between invasion status and surface rate of spread
+fb %>%
+  ggplot(aes(x = Status, y = C_AR)) +
+  geom_boxplot() +
+  geom_jitter(width = 0.2, alpha = 0.2) +
+  labs(title = "Crown Fire Active Ratio by Invasion Status",
+       x = "Invasion Status",
+       y = "Crown Fire Active Ratio") +
+  theme_minimal()
+
+ggplot(fb, aes(x = Status, y = C_AR, fill = Season)) +
+  geom_boxplot() +
+  geom_jitter(position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.75),
+              alpha = 0.05,
+              shape = 16) + # Using a solid circle shape
+  labs(title = "Crown Active Ratio by Invasion Status and Season",
+       x = "Invasion Status",
+       y = "Crown Active Ratio",
+       fill = "Season") +
+  theme_minimal() +
+  scale_fill_viridis_d()
+```
+
+## Active Ratio Table
+```{r active_ratio_table, echo=FALSE}
+# --- 2. Extract draws and filter for parameters of interest ---
+car_draws_filtered <- as_draws_df(C_AR_model_student) %>%
+  select(starts_with("b_"))
+
+# --- 3. Calculate diagnostics ---
+car_diagnostics <- summarise_draws(
+  car_draws_filtered,
+  "R-hat" = rhat,
+  "Bulk ESS" = ess_bulk,
+  "Tail ESS" = ess_tail
+)
+
+# --- 4. Calculate estimates and HPDIs ---
+car_estimates <- car_draws_filtered %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = "variable",
+    values_to = "value"
+  ) %>%
+  group_by(variable) %>%
+  summarise(
+    Estimate = median(value),
+    `Est. Error` = mad(value),
+    HPDI_lower = hdi(value, ci = 0.95)$CI_low,
+    HPDI_upper = hdi(value, ci = 0.95)$CI_high,
+    `Probability > 0` = mean(value > 0),
+    .groups = "drop"
+  )
+
+# --- 5. Join the estimates and diagnostics into one table ---
+car_summary_df <- left_join(car_estimates, car_diagnostics, by = "variable")
+
+# --- 6. Clean and format the summary data frame ---
+car_summary_df_cleaned <- car_summary_df %>%
+  mutate(
+    Parameter = gsub("b_", "", variable),
+    Parameter = gsub("StatusInvaded", "Status-Invaded", Parameter),
+    Parameter = gsub("SeasonSummer", "Season-Summer", Parameter),
+    Parameter = gsub("SeasonWinter", "Season-Winter", Parameter),
+    Parameter = gsub(":", " x ", Parameter)
+  ) %>%
+  select(
+    Parameter,
+    Estimate,
+    `Est. Error`,
+    `HPDI_lower`,
+    `HPDI_upper`,
+    `Probability > 0`,
+    `Bulk ESS`,
+    `Tail ESS`,
+    `R-hat`
+  ) %>%
+  mutate(Parameter = fct_relevel(Parameter, "Intercept")) %>%
+  arrange(Parameter) %>%
+  rename(
+    `95% HPDI (Lower)` = `HPDI_lower`,
+    `95% HPDI (Upper)` = `HPDI_upper`
+  )
+
+# --- 7. Create the final gt table ---
+car_gt_table <- car_summary_df_cleaned %>%
+  mutate(
+    Significant = (`95% HPDI (Lower)` > 0 | `95% HPDI (Upper)` < 0)
+  ) %>%
+  gt(rowname_col = "Parameter") %>%
+  fmt_number(
+    columns = c("Estimate", "Est. Error", "95% HPDI (Lower)", "95% HPDI (Upper)"),
+    decimals = 2
+  ) %>%
+  fmt_number(
+    columns = c("Probability > 0", "R-hat"),
+    decimals = 3
+  ) %>%
+  fmt_number(
+    columns = c("Bulk ESS", "Tail ESS"),
+    decimals = 0,
+    use_seps = TRUE
+  ) %>%
+  tab_style(
+    style = cell_text(weight = "bold"),
+    locations = cells_body(
+      rows = Significant == TRUE
+    )
+  ) %>%
+  cols_hide(columns = "Significant") %>%
+  tab_header(title = "Posterior Estimates for Crown Active Ratio")
+
+# Print the table
+print(car_gt_table)
+
+# Save the final table to a Word document
+gtsave(
+  car_gt_table, 
+  "C:/Users/DrewIvory/OneDrive - University of Florida/Desktop/School/PHD/01_Projects/01_FuelDynamics/02_Data/Posterior_Probabilities/Seasonal_C_AR_Posterior_Table.docx"
+)
+
+```
+
+
+## Active Ratio Conditional Effects
+```{r conditional_effects_Crown_AR, echo=FALSE}
+# Calculate conditional effects and extract the data frame
+CAR_ce_Status <- conditional_effects(C_AR_model_student, effects = "Status")
+CAR_df_Status <- CAR_ce_Status[["Status"]]
+
+# Re-level the factor for plotting
+CAR_df_Status$Status <- factor(CAR_df_Status$Status,
+                                levels = c("Non_Invaded", "Invaded"),
+                                labels = c("Non-Invaded", "Invaded"))
+
+# Plot
+ggplot(CAR_df_Status, aes(x = Status, y = estimate__, color = Status)) +
+  # Add points for the mean estimates
+  geom_point(size = 4) +
+  # Add error bars for the 95% credible interval
+  geom_errorbar(aes(ymin = lower__, ymax = upper__), 
+                width = 0.15, size = 1) +
+  labs(
+    title = "Estimated Crown Fire Active Ratio by Invasion Status",
+    x = "Invasion Status",
+    y = expression("Crown Fire Active Ratio"),
+    color = "Invasion Status"
+  ) +
+  scale_color_manual(values = c("Non-Invaded" = "#1b9e77", "Invaded" = "#d95f02")) +
+  scale_y_continuous(limits = c(0, NA), expand = expansion(mult = c(0, 0.3))) +
+  theme_minimal(base_size = 16) +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.y = element_line(color = "gray85", linetype = "dashed"),
+    legend.position = "none"
+  )
+
+# Conditional effects for the Status:Season interaction
+ce_interaction <- conditional_effects(C_AR_model_student, effects = "Status:Season")
+df_interaction <- ce_interaction[["Status:Season"]]
+# Relevel the status factor
+df_interaction$Status <- factor(df_interaction$Status,
+                                levels = c("Non_Invaded", "Invaded"))
+# Relevel the season factor                             
+df_interaction$Season <- factor(df_interaction$Season,
+                                levels = c("Spring", "Summer", "Winter"))
+
+ggplot(df_interaction, aes(x = Status, y = estimate__, color = Season, group = Season)) +
+  geom_errorbar(aes(ymin = lower__, ymax = upper__),
+                position = position_dodge(width = 0.3),
+                width = 0.2, size = 1) +
+  geom_point(position = position_dodge(width = 0.3), size = 4) +
+  labs(
+    title = "",
+    x = "Invasion Status",
+    y = expression("Crown Fire Active Ratio"),
+    color = "Season"
+  ) +
+  scale_color_manual(values = c("#1b9e77", "#d95f02", "#7570b3")) +
+  scale_y_continuous(limits = c(0, NA), expand = expansion(mult = c(0, 0.3))) +
+  theme_minimal(base_size = 16) +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.y = element_line(color = "gray85", linetype = "dashed"),
+    legend.position = "bottom" # Place legend at the bottom
+  )
+```
+
+
+## Estimated Marginal Means for Crown Fire Active Ratio
+```{r emmeans_C_AR, echo=FALSE}
+emm_CAR <- emmeans(C_AR_model_student, specs = ~ Status | Season)
+
+print(emm_CAR)
+
+pairwise_CAR <- pairs(emm_CAR, reverse = TRUE)
+
+print(pairwise_CAR)
+
+# exact posterior probability
+CAR_pp <- p_direction(pairwise_CAR)
+
+print(CAR_pp)
+
+# Convert the emmeans comparison object to a standard data frame
+pairwise_CAR_df <- as.data.frame(pairwise_CAR)
+
+# Find the full range of the data in your error bars
+min_limit <- min(pairwise_CAR_df$lower.HPD)
+max_limit <- max(pairwise_CAR_df$upper.HPD)
+
+# Define a padding amount
+padding <- 0.5 
+
+# Now, create the plot
+ggplot(pairwise_CAR_df, aes(x = estimate, y = Season)) +
+  # Add a vertical line at 0, which represents "no difference"
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey50") +
+  
+  # Add the error bars representing the 95% HPD interval
+  geom_errorbarh(aes(xmin = lower.HPD, xmax = upper.HPD), 
+                 height = 0.1, size = 1, color = "#FA4616") +
+                 
+  # Add a point for the median estimate
+  geom_point(size = 4, color = "#FA4616") +
+  
+  # Clean up labels and theme
+  labs(
+    x = expression("Estimated Difference in Crown Fire Active Ratio"),
+    y = "Season"
+  ) +
+  theme_minimal(base_size = 14) +
+  
+  # ADD THIS LINE: Use the calculated limits with padding
+  coord_cartesian(xlim = c(min_limit - padding, max_limit + padding))
+```
+
+## GLMM Crown Fire Rate of Spread
+```{r GLMM_Crown_Fire_Rate_of_Spread, include=FALSE}
+
+fb$Status <- relevel(factor(fb$Status), ref = "Non_Invaded")
+
+C_ROS_model_student <- brm(C_ROS ~
+                             Status * Season,
+                           data = fb,
+                           family = student(),
+                           prior = priors,
+                           chains = 4,
+                           iter = 4000,
+                           warmup = 1000,
+                           control = list(adapt_delta = 0.95)
+                           )
+
+```
+
+## Crown Fire Rate of Spread Model Comparison
+```{r compare_Crown_ROS, echo=FALSE}
+summary(C_ROS_model_student)
+
+# Plot the posterior predictive checks
+pp_check(C_ROS_model_student) +
+  labs(title = "Posterior Predictive Check for Crown Rate of Spread Model") +
+  theme_minimal()
+
+# Plot the relationship between invasion status and surface rate of spread
+fb %>%
+  ggplot(aes(x = Status, y = C_ROS)) +
+  geom_boxplot() +
+  geom_jitter(width = 0.2, alpha = 0.2) +
+  labs(title = "Crown Rate of Spread by Invasion Status",
+       x = "Invasion Status",
+       y = "Crown Rate of Spread (m/min)") +
+  theme_minimal()
+
+ggplot(fb, aes(x = Status, y = C_ROS, fill = Season)) +
+  geom_boxplot() +
+  geom_jitter(position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.75),
+              alpha = 0.05,
+              shape = 16) + # Using a solid circle shape
+  labs(title = "Crown Rate of Spread by Invasion Status and Season",
+       x = "Invasion Status",
+       y = "Crown Rate of Spread (m/min)",
+       fill = "Season") +
+  theme_minimal() +
+  scale_fill_viridis_d()
+```
+
+## Crown Fire Rate of Spread Table
+```{r crown_ROS_table, echo=FALSE}
+# --- 2. Extract draws and filter for parameters of interest ---
+cros_draws_filtered <- as_draws_df(C_ROS_model_student) %>%
+  select(starts_with("b_"))
+
+# --- 3. Calculate diagnostics ---
+cros_diagnostics <- summarise_draws(
+  cros_draws_filtered,
+  "R-hat" = rhat,
+  "Bulk ESS" = ess_bulk,
+  "Tail ESS" = ess_tail
+)
+
+# --- 4. Calculate estimates and HPDIs ---
+cros_estimates <- cros_draws_filtered %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = "variable",
+    values_to = "value"
+  ) %>%
+  group_by(variable) %>%
+  summarise(
+    Estimate = median(value),
+    `Est. Error` = mad(value),
+    HPDI_lower = hdi(value, ci = 0.95)$CI_low,
+    HPDI_upper = hdi(value, ci = 0.95)$CI_high,
+    `Probability > 0` = mean(value > 0),
+    .groups = "drop"
+  )
+
+# --- 5. Join the estimates and diagnostics into one table ---
+cros_summary_df <- left_join(cros_estimates, cros_diagnostics, by = "variable")
+
+# --- 6. Clean and format the summary data frame ---
+cros_summary_df_cleaned <- cros_summary_df %>%
+  mutate(
+    Parameter = gsub("b_", "", variable),
+    Parameter = gsub("StatusInvaded", "Status-Invaded", Parameter),
+    Parameter = gsub("SeasonSummer", "Season-Summer", Parameter),
+    Parameter = gsub("SeasonWinter", "Season-Winter", Parameter),
+    Parameter = gsub(":", " x ", Parameter)
+  ) %>%
+  select(
+    Parameter,
+    Estimate,
+    `Est. Error`,
+    `HPDI_lower`,
+    `HPDI_upper`,
+    `Probability > 0`,
+    `Bulk ESS`,
+    `Tail ESS`,
+    `R-hat`
+  ) %>%
+  mutate(Parameter = fct_relevel(Parameter, "Intercept")) %>%
+  arrange(Parameter) %>%
+  rename(
+    `95% HPDI (Lower)` = `HPDI_lower`,
+    `95% HPDI (Upper)` = `HPDI_upper`
+  )
+
+# --- 7. Create the final gt table ---
+cros_gt_table <- cros_summary_df_cleaned %>%
+  mutate(
+    Significant = (`95% HPDI (Lower)` > 0 | `95% HPDI (Upper)` < 0)
+  ) %>%
+  gt(rowname_col = "Parameter") %>%
+  fmt_number(
+    columns = c("Estimate", "Est. Error", "95% HPDI (Lower)", "95% HPDI (Upper)"),
+    decimals = 2
+  ) %>%
+  fmt_number(
+    columns = c("Probability > 0", "R-hat"),
+    decimals = 3
+  ) %>%
+  fmt_number(
+    columns = c("Bulk ESS", "Tail ESS"),
+    decimals = 0,
+    use_seps = TRUE
+  ) %>%
+  tab_style(
+    style = cell_text(weight = "bold"),
+    locations = cells_body(
+      rows = Significant == TRUE
+    )
+  ) %>%
+  cols_hide(columns = "Significant") %>%
+  tab_header(title = "Posterior Estimates for Crown Rate of Spread")
+
+# Print the table
+print(cros_gt_table)
+
+# Save the final table to a Word document
+gtsave(
+  cros_gt_table, 
+  "C:/Users/DrewIvory/OneDrive - University of Florida/Desktop/School/PHD/01_Projects/01_FuelDynamics/02_Data/Posterior_Probabilities/Seasonal_C_ROS_Posterior_Table.docx"
+)
+```
+
+## Crown Fire Rate of Spread Conditional Effects
+```{r conditional_effects_Crown_ROS, echo=FALSE}
+# Calculate conditional effects and extract the data frame
+CROS_ce_Status <- conditional_effects(C_ROS_model_student, effects = "Status")
+CROS_df_Status <- CROS_ce_Status[["Status"]]
+
+# Re-level the factor for plotting
+CROS_df_Status$Status <- factor(CROS_df_Status$Status,
+                                levels = c("Non_Invaded", "Invaded"),
+                                labels = c("Non-Invaded", "Invaded"))
+
+# Plot
+ggplot(CROS_df_Status, aes(x = Status, y = estimate__, color = Status)) +
+  # Add points for the mean estimates
+  geom_point(size = 4) +
+  # Add error bars for the 95% credible interval
+  geom_errorbar(aes(ymin = lower__, ymax = upper__), 
+                width = 0.15, size = 1) +
+  labs(
+    title = "Estimated Crown Rate of Spread by Invasion Status",
+    x = "Invasion Status",
+    y = expression("Crown Rate of Spread (m min"^-1*")"),
+    color = "Invasion Status"
+  ) +
+  scale_color_manual(values = c("Non-Invaded" = "#1b9e77", "Invaded" = "#d95f02")) +
+  scale_y_continuous(limits = c(0, NA), expand = expansion(mult = c(0, 0.3))) +
+  theme_minimal(base_size = 16) +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.y = element_line(color = "gray85", linetype = "dashed"),
+    legend.position = "none"
+  )
+
+# Conditional effects for the Status:Season interaction
+ce_interaction <- conditional_effects(C_ROS_model_student, effects = "Status:Season")
+df_interaction <- ce_interaction[["Status:Season"]]
+# Relevel the status factor
+df_interaction$Status <- factor(df_interaction$Status,
+                                levels = c("Non_Invaded", "Invaded"))
+# Relevel the season factor                             
+df_interaction$Season <- factor(df_interaction$Season,
+                                levels = c("Spring", "Summer", "Winter"))
+
+ggplot(df_interaction, aes(x = Status, y = estimate__, color = Season, group = Season)) +
+  geom_errorbar(aes(ymin = lower__, ymax = upper__),
+                position = position_dodge(width = 0.3),
+                width = 0.2, size = 1) +
+  geom_point(position = position_dodge(width = 0.3), size = 4) +
+  labs(
+    title = "",
+    x = "Invasion Status",
+    y = expression("Crown Fire Rate of Spread (m / min"^-1*")"),
+    color = "Season"
+  ) +
+  scale_color_manual(values = c("#1b9e77", "#d95f02", "#7570b3")) +
+  scale_y_continuous(limits = c(0, NA), expand = expansion(mult = c(0, 0.3))) +
+  theme_minimal(base_size = 16) +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.y = element_line(color = "gray85", linetype = "dashed"),
+    legend.position = "bottom" # Place legend at the bottom
+  )
+```
+
+## Estimated Marginal Means for Crown Fire Rate of Spread
+```{r emmeans_C_ROS, echo=FALSE}
+emm_CROS <- emmeans(C_ROS_model_student, specs = ~ Status | Season)
+
+print(emm_CROS)
+
+pairwise_CROS <- pairs(emm_CROS, reverse = TRUE)
+
+print(pairwise_CROS)
+
+# exact posterior probability
+CROS_pp <- p_direction(pairwise_CROS)
+
+print(CROS_pp)
+
+# Convert the emmeans comparison object to a standard data frame
+pairwise_CROS_df <- as.data.frame(pairwise_CROS)
+
+# Find the full range of the data in your error bars
+min_limit <- min(pairwise_CROS_df$lower.HPD)
+max_limit <- max(pairwise_CROS_df$upper.HPD)
+
+# Define a padding amount
+padding <- 0.5 
+
+# Now, create the plot
+ggplot(pairwise_CROS_df, aes(x = estimate, y = Season)) +
+  # Add a vertical line at 0, which represents "no difference"
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey50") +
+  
+  # Add the error bars representing the 95% HPD interval
+  geom_errorbarh(aes(xmin = lower.HPD, xmax = upper.HPD), 
+                 height = 0.1, size = 1, color = "#FA4616") +
+                 
+  # Add a point for the median estimate
+  geom_point(size = 4, color = "#FA4616") +
+  
+  # Clean up labels and theme
+  labs(
+    x = expression("Estimated Difference in Crown Rate of Spread (m min"^-1*")"),
+    y = "Season"
+  ) +
+  theme_minimal(base_size = 14) +
+  
+  # ADD THIS LINE: Use the calculated limits with padding
+  coord_cartesian(xlim = c(min_limit - padding, max_limit + padding))
+```
+
+
+## GLMM Crown Fire Intensity
+```{r GLMM_Crown_Fire_Intensity, include=FALSE}
+fb$Status <- relevel(factor(fb$Status), ref = "Non_Invaded")
+
+C_Fin_model_student <- brm(C_Fin ~
+                             Status * Season,
+                           data = fb,
+                           family = student(),
+                           prior = priors,
+                           chains = 4,
+                           iter = 4000,
+                           warmup = 1000,
+                           control = list(adapt_delta = 0.95)
+                           )
+
+```
+
+## Crown Fire Intensity Model Comparison
+```{r compare_Crown_Fin, echo=FALSE}
+summary(C_Fin_model_student)
+
+# Plot the posterior predictive checks
+pp_check(C_Fin_model_student) +
+  labs(title = "Posterior Predictive Check for Crown Fire Intensity Model") +
+  theme_minimal()
+
+# Plot the relationship between invasion status and surface rate of spread
+fb %>%
+  ggplot(aes(x = Status, y = C_Fin)) +
+  geom_boxplot() +
+  geom_jitter(width = 0.2, alpha = 0.2) +
+  labs(title = "Crown Fire Intensity by Invasion Status",
+       x = "Invasion Status",
+       y = "Crown Fire Intensity") +
+  theme_minimal()
+
+ggplot(fb, aes(x = Status, y = C_Fin, fill = Season)) +
+  geom_boxplot() +
+  geom_jitter(position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.75),
+              alpha = 0.05,
+              shape = 16) + # Using a solid circle shape
+  labs(title = "Crown Fire Intensity by Invasion Status and Season",
+       x = "Invasion Status",
+       y = "Crown Fire Intensity (kW/m)",
+       fill = "Season") +
+  theme_minimal() +
+  scale_fill_viridis_d()
+```
+
+## Crown Fire Intensity Table
+```{r crown_FI_table, echo=FALSE}
+# --- 2. Extract draws and filter for parameters of interest ---
+cfin_draws_filtered <- as_draws_df(C_Fin_model_student) %>%
+  select(starts_with("b_"))
+
+# --- 3. Calculate diagnostics ---
+cfin_diagnostics <- summarise_draws(
+  cfin_draws_filtered,
+  "R-hat" = rhat,
+  "Bulk ESS" = ess_bulk,
+  "Tail ESS" = ess_tail
+)
+
+# --- 4. Calculate estimates and HPDIs ---
+cfin_estimates <- cfin_draws_filtered %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = "variable",
+    values_to = "value"
+  ) %>%
+  group_by(variable) %>%
+  summarise(
+    Estimate = median(value),
+    `Est. Error` = mad(value),
+    HPDI_lower = hdi(value, ci = 0.95)$CI_low,
+    HPDI_upper = hdi(value, ci = 0.95)$CI_high,
+    `Probability > 0` = mean(value > 0),
+    .groups = "drop"
+  )
+
+# --- 5. Join the estimates and diagnostics into one table ---
+cfin_summary_df <- left_join(cfin_estimates, cfin_diagnostics, by = "variable")
+
+# --- 6. Clean and format the summary data frame ---
+cfin_summary_df_cleaned <- cfin_summary_df %>%
+  mutate(
+    Parameter = gsub("b_", "", variable),
+    Parameter = gsub("StatusInvaded", "Status-Invaded", Parameter),
+    Parameter = gsub("SeasonSummer", "Season-Summer", Parameter),
+    Parameter = gsub("SeasonWinter", "Season-Winter", Parameter),
+    Parameter = gsub(":", " x ", Parameter)
+  ) %>%
+  select(
+    Parameter,
+    Estimate,
+    `Est. Error`,
+    `HPDI_lower`,
+    `HPDI_upper`,
+    `Probability > 0`,
+    `Bulk ESS`,
+    `Tail ESS`,
+    `R-hat`
+  ) %>%
+  mutate(Parameter = fct_relevel(Parameter, "Intercept")) %>%
+  arrange(Parameter) %>%
+  rename(
+    `95% HPDI (Lower)` = `HPDI_lower`,
+    `95% HPDI (Upper)` = `HPDI_upper`
+  )
+
+# --- 7. Create the final gt table ---
+cfin_gt_table <- cfin_summary_df_cleaned %>%
+  mutate(
+    Significant = (`95% HPDI (Lower)` > 0 | `95% HPDI (Upper)` < 0)
+  ) %>%
+  gt(rowname_col = "Parameter") %>%
+  fmt_number(
+    columns = c("Estimate", "Est. Error", "95% HPDI (Lower)", "95% HPDI (Upper)"),
+    decimals = 2
+  ) %>%
+  fmt_number(
+    columns = c("Probability > 0", "R-hat"),
+    decimals = 3
+  ) %>%
+  fmt_number(
+    columns = c("Bulk ESS", "Tail ESS"),
+    decimals = 0,
+    use_seps = TRUE
+  ) %>%
+  tab_style(
+    style = cell_text(weight = "bold"),
+    locations = cells_body(
+      rows = Significant == TRUE
+    )
+  ) %>%
+  cols_hide(columns = "Significant") %>%
+  tab_header(title = "Posterior Estimates for Crown Fire Intensity")
+
+# Print the table
+print(cfin_gt_table)
+
+# Save the final table to a Word document
+gtsave(
+  cfin_gt_table, 
+  "C:/Users/DrewIvory/OneDrive - University of Florida/Desktop/School/PHD/01_Projects/01_FuelDynamics/02_Data/Posterior_Probabilities/Seasonal_C_Fin_Posterior_Table.docx"
+)
+
+
+```
+
+
+## Crown Fire Intensity Conditional Effects
+```{r conditional_effects_Crown_Fin, echo=FALSE}
+# Calculate conditional effects and extract the data frame
+CFin_ce_Status <- conditional_effects(C_Fin_model_student, effects = "Status")
+CFin_df_Status <- CFin_ce_Status[["Status"]]
+
+# Re-level the factor for plotting
+CFin_df_Status$Status <- factor(CFin_df_Status$Status,
+                                levels = c("Non_Invaded", "Invaded"),
+                                labels = c("Non-Invaded", "Invaded"))
+
+# Plot
+ggplot(CFin_df_Status, aes(x = Status, y = estimate__, color = Status)) +
+  # Add points for the mean estimates
+  geom_point(size = 4) +
+  # Add error bars for the 95% credible interval
+  geom_errorbar(aes(ymin = lower__, ymax = upper__), 
+                width = 0.15, size = 1) +
+  labs(
+    title = "Estimated Crown Fire Intensity by Invasion Status",
+    x = "Invasion Status",
+    y = expression("Crown Fire Intensity (kW m"^-1*")"),
+    color = "Invasion Status"
+  ) +
+  scale_color_manual(values = c("Non-Invaded" = "#1b9e77", "Invaded" = "#d95f02")) +
+  scale_y_continuous(limits = c(0, NA), expand = expansion(mult = c(0, 0.3))) +
+  theme_minimal(base_size = 16) +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.y = element_line(color = "gray85", linetype = "dashed"),
+    legend.position = "none"
+  )
+
+# Conditional effects for the Status:Season interaction
+ce_interaction <- conditional_effects(C_Fin_model_student, effects = "Status:Season")
+df_interaction <- ce_interaction[["Status:Season"]]
+# Relevel the status factor
+df_interaction$Status <- factor(df_interaction$Status,
+                                levels = c("Non_Invaded", "Invaded"))
+# Relevel the season factor                             
+df_interaction$Season <- factor(df_interaction$Season,
+                                levels = c("Spring", "Summer", "Winter"))
+
+ggplot(df_interaction, aes(x = Status, y = estimate__, color = Season, group = Season)) +
+  geom_errorbar(aes(ymin = lower__, ymax = upper__),
+                position = position_dodge(width = 0.3),
+                width = 0.2, size = 1) +
+  geom_point(position = position_dodge(width = 0.3), size = 4) +
+  labs(
+    title = "",
+    x = "Invasion Status",
+    y = expression("Crown Fire Intensity (kW / m"^-1*")"),
+    color = "Season"
+  ) +
+  scale_color_manual(values = c("#1b9e77", "#d95f02", "#7570b3")) +
+  scale_y_continuous(limits = c(0, NA), expand = expansion(mult = c(0, 0.3))) +
+  theme_minimal(base_size = 16) +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.y = element_line(color = "gray85", linetype = "dashed"),
+    legend.position = "bottom" # Place legend at the bottom
+  )
+```
+
+
+## Estimated Marginal Means for Crown Fire Intensity
+```{r emmeans_C_Fin, echo=FALSE}
+emm_CFin <- emmeans(C_Fin_model_student, specs = ~ Status | Season)
+
+emm_CFin_df <- as.data.frame(emm_CFin)
+
+emm_CFin_df <- emm_CFin_df %>%
+  mutate(across(c(emmean, lower.HPD, upper.HPD), ~ round(.x, 2)))
+
+print(emm_CFin_df)
+
+pairwise_CFin <- pairs(emm_CFin, reverse = TRUE) 
+
+pairwise_CFin_df <- as.data.frame(pairwise_CFin)
+
+pairwise_CFin_df <- pairwise_CFin_df %>%
+  mutate(across(c(estimate, lower.HPD, upper.HPD), ~ round(.x, 2)))
+  
+print(pairwise_CFin_df)
+
+CFin_pp <- p_direction(pairwise_CFin) 
+
+CFin_pp <- CFin_pp %>%
+  mutate(pd = sprintf("%.2f", pd)) %>%
+  rename(`Posterior Probability` = pd)
+
+print(CFin_pp)
+
+# Find the full range of the data in your error bars
+min_limit <- min(pairwise_CFin_df$lower.HPD)
+max_limit <- max(pairwise_CFin_df$upper.HPD)
+
+# Define a padding amount
+padding <- 0.5 
+
+# Now, create the plot
+ggplot(pairwise_CFin_df, aes(x = estimate, y = Season)) +
+  # Add a vertical line at 0, which represents "no difference"
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey50") +
+  
+  # Add the error bars representing the 95% HPD interval
+  geom_errorbarh(aes(xmin = lower.HPD, xmax = upper.HPD), 
+                 height = 0.1, size = 1, color = "#FA4616") +
+                 
+  # Add a point for the median estimate
+  geom_point(size = 4, color = "#FA4616") +
+  
+  # Clean up labels and theme
+  labs(
+    x = expression("Estimated Difference in Crown Fire Intensity (kW m"^-1*")"),
+    y = "Season"
+  ) +
+  theme_minimal(base_size = 14) +
+  
+  # ADD THIS LINE: Use the calculated limits with padding
+  coord_cartesian(xlim = c(min_limit - padding, max_limit + padding))
+```
+
+## GLMM Crown Fire Flame Length
+```{r GLMM_Crown_Fire_Flame_Length, include=FALSE}
+fb$Status <- relevel(factor(fb$Status), ref = "Non_Invaded")
+
+C_FL_model_student <- brm(C_FL ~
+                             Status * Season,
+                          data = fb,
+                           family = student(),
+                           prior = priors,
+                           chains = 4,
+                           iter = 4000,
+                           warmup = 1000,
+                           control = list(adapt_delta = 0.95)
+                           )
+
+
+```
+
+## Crown Fire Flame Length Model Comparison
+```{r compare_Crown_FL, echo=FALSE}
+summary(C_FL_model_student)
+
+# Plot the posterior predictive checks
+pp_check(C_FL_model_student) +
+  labs(title = "Posterior Predictive Check for Crown Flame Length Model") +
+  theme_minimal()
+
+# Plot the relationship between invasion status and surface rate of spread
+fb %>%
+  ggplot(aes(x = Status, y = C_FL)) +
+  geom_boxplot() +
+  geom_jitter(width = 0.2, alpha = 0.2) +
+  labs(title = "Crown Flame Length by Invasion Status",
+       x = "Invasion Status",
+       y = "Crown Flame Length") +
+  theme_minimal()
+
+ggplot(fb, aes(x = Status, y = C_FL, fill = Season)) +
+  geom_boxplot() +
+  geom_jitter(position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.75),
+              alpha = 0.05,
+              shape = 16) + # Using a solid circle shape
+  labs(title = "Crown Flame Length by Invasion Status and Season",
+       x = "Invasion Status",
+       y = "Crown Flame Length (m)",
+       fill = "Season") +
+  theme_minimal() +
+  scale_fill_viridis_d()
+```
+
+## Crown Flame Length Table
+```{r crown_fl_table, echo=FALSE}
+# --- 2. Extract draws and filter for parameters of interest ---
+cfl_draws_filtered <- as_draws_df(C_FL_model_student) %>%
+  select(starts_with("b_"))
+
+# --- 3. Calculate diagnostics ---
+cfl_diagnostics <- summarise_draws(
+  cfl_draws_filtered,
+  "R-hat" = rhat,
+  "Bulk ESS" = ess_bulk,
+  "Tail ESS" = ess_tail
+)
+
+# --- 4. Calculate estimates and HPDIs ---
+cfl_estimates <- cfl_draws_filtered %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = "variable",
+    values_to = "value"
+  ) %>%
+  group_by(variable) %>%
+  summarise(
+    Estimate = median(value),
+    `Est. Error` = mad(value),
+    HPDI_lower = hdi(value, ci = 0.95)$CI_low,
+    HPDI_upper = hdi(value, ci = 0.95)$CI_high,
+    `Probability > 0` = mean(value > 0),
+    .groups = "drop"
+  )
+
+# --- 5. Join the estimates and diagnostics into one table ---
+cfl_summary_df <- left_join(cfl_estimates, cfl_diagnostics, by = "variable")
+
+# --- 6. Clean and format the summary data frame ---
+cfl_summary_df_cleaned <- cfl_summary_df %>%
+  mutate(
+    Parameter = gsub("b_", "", variable),
+    Parameter = gsub("StatusInvaded", "Status-Invaded", Parameter),
+    Parameter = gsub("SeasonSummer", "Season-Summer", Parameter),
+    Parameter = gsub("SeasonWinter", "Season-Winter", Parameter),
+    Parameter = gsub(":", " x ", Parameter)
+  ) %>%
+  select(
+    Parameter,
+    Estimate,
+    `Est. Error`,
+    `HPDI_lower`,
+    `HPDI_upper`,
+    `Probability > 0`,
+    `Bulk ESS`,
+    `Tail ESS`,
+    `R-hat`
+  ) %>%
+  mutate(Parameter = fct_relevel(Parameter, "Intercept")) %>%
+  arrange(Parameter) %>%
+  rename(
+    `95% HPDI (Lower)` = `HPDI_lower`,
+    `95% HPDI (Upper)` = `HPDI_upper`
+  )
+
+# --- 7. Create the final gt table ---
+cfl_gt_table <- cfl_summary_df_cleaned %>%
+  mutate(
+    Significant = (`95% HPDI (Lower)` > 0 | `95% HPDI (Upper)` < 0)
+  ) %>%
+  gt(rowname_col = "Parameter") %>%
+  fmt_number(
+    columns = c("Estimate", "Est. Error", "95% HPDI (Lower)", "95% HPDI (Upper)"),
+    decimals = 2
+  ) %>%
+  fmt_number(
+    columns = c("Probability > 0", "R-hat"),
+    decimals = 3
+  ) %>%
+  fmt_number(
+    columns = c("Bulk ESS", "Tail ESS"),
+    decimals = 0,
+    use_seps = TRUE
+  ) %>%
+  tab_style(
+    style = cell_text(weight = "bold"),
+    locations = cells_body(
+      rows = Significant == TRUE
+    )
+  ) %>%
+  cols_hide(columns = "Significant") %>%
+  tab_header(title = "Posterior Estimates for Crown Flame Length")
+
+# Print the table
+print(cfl_gt_table)
+
+# Save the final table to a Word document
+gtsave(
+  cfl_gt_table, 
+  "C:/Users/DrewIvory/OneDrive - University of Florida/Desktop/School/PHD/01_Projects/01_FuelDynamics/02_Data/Posterior_Probabilities/Seasonal_C_Fl_Posterior_Table.docx"
+)
+
+```
+
+
+## Crown Fire Flame Length Conditional Effects
+```{r conditional_effects_Crown_FL, echo=FALSE}
+# Calculate conditional effects and extract the data frame
+CFL_ce_Status <- conditional_effects(C_FL_model_student, effects = "Status")
+CFL_df_Status <- CFL_ce_Status[["Status"]]
+
+# Re-level the factor for plotting
+CFL_df_Status$Status <- factor(CFL_df_Status$Status,
+                                levels = c("Non_Invaded", "Invaded"),
+                                labels = c("Non-Invaded", "Invaded"))
+
+# Plot
+ggplot(CFL_df_Status, aes(x = Status, y = estimate__, color = Status)) +
+  # Add points for the mean estimates
+  geom_point(size = 4) +
+  # Add error bars for the 95% credible interval
+  geom_errorbar(aes(ymin = lower__, ymax = upper__), 
+                width = 0.15, size = 1) +
+  labs(
+    title = "Estimated Crown Flame Length by Invasion Status",
+    x = "Invasion Status",
+    y = expression("Crown Flame Length (m)"),
+    color = "Invasion Status"
+  ) +
+  scale_color_manual(values = c("Non-Invaded" = "#1b9e77", "Invaded" = "#d95f02")) +
+  scale_y_continuous(limits = c(0, NA), expand = expansion(mult = c(0, 0.3))) +
+  theme_minimal(base_size = 16) +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.y = element_line(color = "gray85", linetype = "dashed"),
+    legend.position = "none"
+  )
+
+# Conditional effects for the Status:Season interaction
+ce_interaction <- conditional_effects(C_FL_model_student, effects = "Status:Season")
+df_interaction <- ce_interaction[["Status:Season"]]
+# Relevel the status factor
+df_interaction$Status <- factor(df_interaction$Status,
+                                levels = c("Non_Invaded", "Invaded"))
+# Relevel the season factor                             
+df_interaction$Season <- factor(df_interaction$Season,
+                                levels = c("Spring", "Summer", "Winter"))
+
+ggplot(df_interaction, aes(x = Status, y = estimate__, color = Season, group = Season)) +
+  geom_errorbar(aes(ymin = lower__, ymax = upper__),
+                position = position_dodge(width = 0.3),
+                width = 0.2, size = 1) +
+  geom_point(position = position_dodge(width = 0.3), size = 4) +
+  labs(
+    title = "",
+    x = "Invasion Status",
+    y = expression("Crown Fire Flame Length (m)"),
+    color = "Season"
+  ) +
+  scale_color_manual(values = c("#1b9e77", "#d95f02", "#7570b3")) +
+  scale_y_continuous(limits = c(0, NA), expand = expansion(mult = c(0, 0.3))) +
+  theme_minimal(base_size = 16) +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.y = element_line(color = "gray85", linetype = "dashed"),
+    legend.position = "bottom" # Place legend at the bottom
+  )  
+```
+
+## Estimated Marginal Means for Crown Fire Flame Length
+```{r emmeans_C_FL, echo=FALSE}
+emm_CFL <- emmeans(C_FL_model_student, specs = ~ Status | Season)
+
+print(emm_CFL)
+
+pairwise_CFL <- pairs(emm_CFL, reverse = TRUE)
+
+print(pairwise_CFL)
+
+# exact posterior probability
+CFL_pp <- p_direction(pairwise_CFL)
+
+print(CFL_pp)
+
+# Convert the emmeans comparison object to a standard data frame
+pairwise_CFL_df <- as.data.frame(pairwise_CFL)
+
+# Find the full range of the data in your error bars
+min_limit <- min(pairwise_CFL_df$lower.HPD)
+max_limit <- max(pairwise_CFL_df$upper.HPD)
+
+# Define a padding amount
+padding <- 0.5 
+
+# Now, create the plot
+ggplot(pairwise_CFL_df, aes(x = estimate, y = Season)) +
+  # Add a vertical line at 0, which represents "no difference"
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey50") +
+  
+  # Add the error bars representing the 95% HPD interval
+  geom_errorbarh(aes(xmin = lower.HPD, xmax = upper.HPD), 
+                 height = 0.1, size = 1, color = "#FA4616") +
+                 
+  # Add a point for the median estimate
+  geom_point(size = 4, color = "#FA4616") +
+  
+  # Clean up labels and theme
+  labs(
+    x = expression("Estimated Difference in Crown Flame Length (m)"),
+    y = "Season"
+  ) +
+  theme_minimal(base_size = 14) +
+  
+  # ADD THIS LINE: Use the calculated limits with padding
+  coord_cartesian(xlim = c(min_limit - padding, max_limit + padding))
+```
+
+
+## Combined Plot
+```{r combined_plot, echo=FALSE}
+#--------------------------------------------
+# 1. Use your UF colors
+#--------------------------------------------
+uf_colors <- c(
+  "Summer" = "coral",
+  "Winter" = "steelblue",
+  "Spring" = "#228B22"
+)
+
+#--------------------------------------------
+# 2. Apply UF colors to each plot
+#--------------------------------------------
+sea_SROS <- ggplot(fb, aes(x = Status, y = S_ROS, fill = Season)) +
+  geom_jitter(
+    aes(color = Season),
+    position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.75),
+    alpha = 0.02,
+    size = 1.5
+  ) +
+  geom_boxplot(outlier.shape = NA) +
+
+  labs(x = "Invasion Status",
+       y = "ROS (m/min)",
+       fill = "Season",
+       color = "Season") +
+
+  scale_fill_manual(values = uf_colors) +
+  scale_color_manual(values = uf_colors) +
+
+  theme_minimal()
+
+
+
+sea_SFL <- ggplot(fb, aes(x = Status, y = S_FL, fill = Season)) +
+  geom_jitter(
+    aes(color = Season),
+    position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.75),
+    alpha = 0.02,
+    size = 1.5
+  ) +
+  geom_boxplot(outlier.shape = NA) +
+
+  labs(x = "Invasion Status",
+       y = "FL (m)",
+       fill = "Season",
+       color = "Season") +
+
+  scale_fill_manual(values = uf_colors) +
+  scale_color_manual(values = uf_colors) +
+
+  theme_minimal()
+
+
+
+#sea_Fin <- ggplot(fb, aes(x = Status, y = S_Fin, fill = Season)) +
+#  geom_boxplot() +
+#  geom_jitter(position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.75),
+#              alpha = 0.02, shape = 16) +
+#  labs(x = "Invasion Status", y = "FIn (kW/m)", fill = "Season") +
+#  scale_fill_manual(values = uf_colors) +
+#  theme_minimal()
+
+sea_CTR <- ggplot(fb, aes(x = Status, y = C_TR, fill = Season)) +
+  geom_jitter(
+    aes(color = Season),
+    position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.75),
+    alpha = 0.02,
+    size = 1.5
+  ) +
+  geom_boxplot(outlier.shape = NA) +
+
+  labs(x = "Invasion Status",
+       y = "Crown TR",
+       fill = "Season",
+       color = "Season") +
+
+  scale_fill_manual(values = uf_colors) +
+  scale_color_manual(values = uf_colors) +
+
+  theme_minimal()
+
+
+
+#sea_CAR <- ggplot(fb, aes(x = Status, y = C_AR, fill = Season)) +
+#  geom_boxplot() +
+#  geom_jitter(position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.75),
+#              alpha = 0.02, shape = 16) +
+#  labs(x = "Invasion Status", y = "Crown AR", fill = "Season") +
+#  scale_fill_manual(values = uf_colors) +
+#  theme_minimal()
+
+#sea_CROS <- ggplot(fb, aes(x = Status, y = C_ROS, fill = Season)) +
+#  geom_boxplot() +
+#  geom_jitter(position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.75),
+#              alpha = 0.02, shape = 16) +
+#  labs(x = "Invasion Status", y = "Crown ROS (m/min)", fill = "Season") +
+#  scale_fill_manual(values = uf_colors) +
+#  theme_minimal()
+
+#sea_CFin <- ggplot(fb, aes(x = Status, y = C_Fin, fill = Season)) +
+#  geom_boxplot() +
+#  geom_jitter(position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.75),
+#              alpha = 0.02, shape = 16) +
+#  labs(x = "Invasion Status", y = "Crown FIn (kW/m)", fill = "Season") +
+#  scale_fill_manual(values = uf_colors) +
+#  theme_minimal()
+
+#sea_CFL <- ggplot(fb, aes(x = Status, y = C_FL, fill = Season)) +
+#  geom_boxplot() +
+#  geom_jitter(position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.75),
+#              alpha = 0.02, shape = 16) +
+#  labs(x = "Invasion Status", y = "Crown FL (m)", fill = "Season") +
+#  scale_fill_manual(values = uf_colors) +
+#  theme_minimal()
+
+#--------------------------------------------
+# 2. Custom theme with larger fonts
+#--------------------------------------------
+my_theme <- theme_minimal(base_size = 14) +
+  theme(
+    axis.title   = element_text(size = 20, face = "bold"),
+    axis.text    = element_text(size = 18),
+    plot.title   = element_text(size = 16, face = "bold", hjust = 0.5),
+    legend.title = element_text(size = 20),
+    legend.text  = element_text(size = 18),
+    plot.tag     = element_text(size = 18, face = "bold", hjust = 0),
+    panel.grid.minor = element_blank()
+  )
+
+#--------------------------------------------
+# 3. Remove x-axis text/ticks for top 3 rows
+#--------------------------------------------
+no_x <- theme(
+  axis.title.x = element_blank(),
+  axis.text.x  = element_blank(),
+  axis.ticks.x = element_blank()
+)
+
+#--------------------------------------------
+# 4. Apply colors, theme, and x-axis removal
+#--------------------------------------------
+sea_SROS <- sea_SROS + scale_fill_manual(values = uf_colors) + my_theme + no_x
+sea_SFL   <- sea_SFL   + scale_fill_manual(values = uf_colors) + my_theme + no_x
+#sea_Fin   <- sea_Fin   + scale_fill_manual(values = uf_colors) + my_theme + no_x
+sea_CTR   <- sea_CTR   + scale_fill_manual(values = uf_colors) + my_theme + no_x
+#sea_CAR   <- sea_CAR   + scale_fill_manual(values = uf_colors) + my_theme + no_x
+#sea_CROS  <- sea_CROS  + scale_fill_manual(values = uf_colors) + my_theme + no_x
+# bottom row keeps x-axis
+#sea_CFin  <- sea_CFin  + scale_fill_manual(values = uf_colors) + my_theme
+#sea_CFL   <- sea_CFL   + scale_fill_manual(values = uf_colors) + my_theme
+#sea_Fin   <- sea_Fin   + scale_fill_manual(values = uf_colors) + my_theme
+sea_CTR   <- sea_CTR   + scale_fill_manual(values = uf_colors) + my_theme
+
+#--------------------------------------------
+# 5. Combine into 2 columns × 4 rows with shared legend
+#--------------------------------------------
+combined_plot <- (sea_SROS | sea_SFL) /
+                 (sea_CTR) +
+  plot_layout(guides = "collect") +   # single legend
+  plot_annotation(
+    tag_levels = list(
+      c(
+        "A.", "B.",
+        "C."
+      )
+    ),
+    theme = my_theme +
+      theme(legend.position = "right")
+  )
+
+#--------------------------------------------
+# 6. Print and save
+#--------------------------------------------
+print(combined_plot)
+
+
+## Save the combined plot
+ggsave("C:/Users/DrewIvory/OneDrive - University of Florida/Desktop/School/PHD/01_Projects/01_FuelDynamics/03_Figure/O3/Seasonal_Fire_Behavior_Figure.png", plot = combined_plot, width = 16, height = 12)
+```
+
+## Updated Plots
+```{r updated_plots, echo=FALSE}
+#--------------------------------------------
+# 1. UF color palette
+#--------------------------------------------
+uf_colors <- c(
+  "Summer" = "coral",
+  "Winter" = "steelblue",
+  "Spring" = "#228B22"
+)
+
+#--------------------------------------------
+# 2. Reviewer-compliant theme
+#--------------------------------------------
+my_theme <- theme_minimal(base_size = 18) +
+  theme(
+    axis.title   = element_text(size = 26, face = "bold"),
+    axis.text    = element_text(size = 24),
+    axis.text.x  = element_text(size = 24, face = "bold"),
+    axis.line    = element_line(color = "black", linewidth = 0.8),
+    axis.ticks   = element_line(color = "black", linewidth = 0.6),
+
+    legend.title = element_text(size = 20, face = "bold"),
+    legend.text  = element_text(size = 18),
+
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank(),
+    panel.grid.major.y = element_line(color = "grey75", linewidth = 0.9),
+    panel.grid.minor.y = element_line(color = "grey88", linewidth = 0.5),
+
+    plot.tag     = element_text(size = 24, face = "bold")
+  )
+
+#--------------------------------------------
+# 3. Helper function to avoid repetition
+#--------------------------------------------
+make_season_plot <- function(df, yvar, ylab){
+  ggplot(df, aes(x = Status, y = .data[[yvar]], fill = Season)) +
+
+    geom_jitter(
+      aes(color = Season),
+      position = position_jitterdodge(
+        jitter.width = 0.15,
+        dodge.width  = 0.75
+      ),
+      alpha = 0.05,
+      size = 1.8
+    ) +
+
+    geom_boxplot(
+      position = position_dodge(width = 0.75),
+      alpha = 0.9,
+      outlier.shape = NA
+    ) +
+
+    scale_x_discrete(
+      labels = c(
+        "Invaded"      = "Invaded",
+        "Non_Invaded"  = "Non-Invaded"
+      )
+    ) +
+
+    scale_fill_manual(values = uf_colors) +
+    scale_color_manual(values = uf_colors) +
+
+    labs(x = "Invasion Status",
+         y = ylab,
+         fill  = "Season",
+         color = "Season") +
+
+    my_theme
+}
+
+
+
+#--------------------------------------------
+# 4. Create plots
+#--------------------------------------------
+sea_SROS <- make_season_plot(fb, "S_ROS", "Surface Fire ROS (m/min)")
+sea_SFL  <- make_season_plot(fb, "S_FL",  "Surface Fire FL (m)")
+sea_CTR  <- make_season_plot(fb, "C_TR",  "Crown Fire TR")
+
+#--------------------------------------------
+# 5. Remove x-axis for top panels only
+#--------------------------------------------
+no_x <- theme(
+  axis.title.x = element_blank(),
+  axis.text.x  = element_blank(),
+  axis.ticks.x = element_blank()
+)
+
+sea_SROS <- sea_SROS + no_x
+sea_SFL  <- sea_SFL  + no_x
+# keep x-axis on sea_CTR
+
+#--------------------------------------------
+# 6. Stack plots vertically (3 × 1)
+#--------------------------------------------
+combined_plot <-
+  sea_SROS /
+  sea_SFL  /
+  sea_CTR +
+  plot_layout(guides = "collect") +
+  plot_annotation(tag_levels = "A") &
+  theme(legend.position = "right")
+
+#--------------------------------------------
+# 7. Print and save
+#--------------------------------------------
+print(combined_plot)
+
+ggsave(
+  "C:/Users/DrewIvory/OneDrive - University of Florida/Desktop/School/PHD/01_Projects/01_FuelDynamics/03_Figure/O3/Seasonal_Fire_Behavior_Figure.png",
+  plot  = combined_plot,
+  width = 10,
+  height = 16
+)
+
+```

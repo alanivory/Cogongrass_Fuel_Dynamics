@@ -1,0 +1,1585 @@
+---
+title: "Fire Behavior Comparison"
+author: "Alan Ivory"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE)
+pacman::p_load(tidyverse, brms, readxl, parameters, gt, posterior, broom.mixed, ggrepel, cowplot, patchwork)
+
+# Set seed
+set.seed(97)
+
+fb <- read_excel("C:/Users/DrewIvory/OneDrive - University of Florida/Desktop/School/PHD/01_Projects/01_FuelDynamics/02_Data/02_Fuel_Data/C1O2_FireData.xlsx")
+
+# Remove rows with NA in S_ROS
+fb <- fb %>%
+  dplyr::filter(!is.na(S_ROS))
+```
+
+## Standardize Predictors
+```{r standardize_predictors, echo=TRUE}
+# variables to recode
+fuel_vars <- c("Live_FM", "Dead_FM",
+                  "LiveB", "DeadB", 
+                  "LitterB", "TreeBH")
+
+
+# Standardized predictors
+fb <- fb %>%
+  mutate(across(all_of(fuel_vars), ~ as.numeric(scale(.)), .names = "{.col}_z"))
+
+
+# Split data by invasion status
+fb_invaded    <- fb %>% filter(Status == "Invaded")
+fb_noninvaded <- fb %>% filter(Status == "Non_Invaded")
+
+# Weakly regularizing priors
+priors <- c(
+  prior(normal(0, 1), class = "b"),
+  prior(student_t(3, 0, 2), class = "sigma")
+)
+
+```
+
+## GLMM Surface Rate of Spread
+```{r GLMM_Sur_ROS, echo=TRUE}
+
+
+# Fit Bayesian regression for invaded sites
+sros_model_inv <- brm(
+  S_ROS ~ Live_FM_z + Dead_FM_z +
+          LiveB_z + DeadB_z + LitterB_z,
+  data = fb_invaded,
+  family = student(),
+  prior = priors,
+  chains = 4, iter = 4000, warmup = 1000, cores = 4,
+  control = list(adapt_delta = 0.95)
+)
+
+# Fit Bayesian regression for non-invaded sites
+sros_model_noninv <- brm(
+  S_ROS ~ Live_FM_z + Dead_FM_z +
+          LiveB_z + DeadB_z + LitterB_z,
+  data = fb_noninvaded,
+  family = student(),
+  prior = priors,
+  chains = 4, iter = 4000, warmup = 1000, cores = 4,
+  control = list(adapt_delta = 0.95)
+)
+
+summary(sros_model_inv)
+summary(sros_model_noninv)
+```
+## Rate of Spread Model Comparison
+```{r compare_S_ROS, echo=TRUE}
+# Posterior summaries
+posterior_summary(sros_model_inv)
+posterior_summary(sros_model_noninv)
+```
+
+## Surface Rate of Spread Figure
+```{r surface_rate_of_spread_Figure, echo=FALSE}
+
+# Extract coefficients from both models
+tidy_inv <- tidy(sros_model_inv) %>% 
+  mutate(group = "Invaded")
+
+tidy_noninv <- tidy(sros_model_noninv) %>% 
+  mutate(group = "Non-Invaded")
+
+# Combine the results into one data frame
+combined_coeffs <- bind_rows(tidy_inv, tidy_noninv)
+
+# Clean up the data for plotting
+plot_data <- combined_coeffs %>%
+  filter(effect == "fixed" & term != "(Intercept)") %>% # Keep only fixed effects, remove intercept
+  mutate(
+    # Clean up predictor names for the plot labels
+    term = str_replace(term, "Live_FM_z", "Live Fuel Moisture"),
+    term = str_replace(term, "Dead_FM_z", "Dead Fuel Moisture"),
+    term = str_replace(term, "LiveB_z", "Live Biomass"),
+    term = str_replace(term, "DeadB_z", "Dead Biomass"),
+    term = str_replace(term, "LitterB_z", "Litter Biomass")
+  ) %>% 
+  # This makes the plot order variables top-to-bottom as they appear here
+  mutate(term = fct_inorder(term) %>% fct_rev())
+
+# Define a dodge width for consistent spacing
+dodge <- position_dodge(width = 0.6)
+
+# Create the plot using the correct column names: conf.low and conf.high
+coefficient_plot_sros <- ggplot(plot_data, aes(x = estimate, y = term, color = group)) +
+  # Add a vertical line at zero for reference
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey70") +
+  
+  # Add the horizontal error bars using the correct column names
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high), height = 0, linewidth = 0.8, position = dodge) +
+  
+  # Add the points for the median estimates
+  geom_point(aes(shape = group), size = 3.5, position = dodge) +
+  
+  # Apply a clean theme and customize labels
+  labs(
+    x = "Standardized Regression Coefficients (β)",
+    y = NULL,
+    color = "Site Status"
+  ) +
+  scale_color_manual(values = c("Invaded" = "coral", "Non-invaded" = "steelblue")) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "bottom",
+    panel.grid.major.y = element_blank()
+  )
+
+# Display the plot
+print(coefficient_plot_sros)
+
+
+# Data preparation for labels (using the correct 'conf.low' and 'conf.high' columns)
+plot_data_with_labels_sros <- plot_data %>%
+  mutate(
+    label_text = paste0("β = ", round(estimate, 2), 
+                        ", 95% CI [", round(conf.low, 2), ", ", round(conf.high, 2), "]")
+  )
+
+plot_data_with_labels_sros <- plot_data_with_labels_sros %>%
+  mutate(signif = conf.low * conf.high > 0)
+
+
+dodge <- position_dodge(width = 0.6)
+
+clean_plot_sros <- ggplot(
+  plot_data_with_labels_sros,
+  aes(x = estimate, y = term, color = group)
+) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey70") +
+  geom_errorbarh(
+    aes(xmin = conf.low, xmax = conf.high),
+    height = 0, linewidth = 0.8, position = dodge
+  ) +
+  geom_point(size = 3.5, position = dodge, alpha = 0.8) +
+  scale_color_manual(values = c("Invaded" = "coral", "Non-Invaded" = "steelblue")) +
+  coord_cartesian(
+    xlim = c(min(plot_data_with_labels_sros$conf.low) - 1.0,
+             max(plot_data_with_labels_sros$conf.high) + 1.0)
+  ) +
+  labs(
+    x = "Standardized Regression Coefficients (β)",
+    y = NULL,
+    color = "Site Status"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "bottom",
+    panel.grid.major.y = element_blank()
+  )
+
+print(clean_plot_sros)
+```
+
+
+## GLMM Flame Length
+```{r GLMM_Sur_FL, echo=FALSE}
+# Fit Bayesian regression for invaded sites
+sfl_model_inv <- brm(
+  S_FL ~ Live_FM_z + Dead_FM_z +
+          LiveB_z + DeadB_z + LitterB_z,
+  data = fb_invaded,
+  family = student(),
+  prior = priors,
+  chains = 4,
+  iter = 4000,
+  warmup = 1000,
+  cores = 4,
+  control = list(adapt_delta = 0.95)
+)
+
+# Fit Bayesian regression for non-invaded sites
+sfl_model_noninv <- brm(
+  S_FL ~ Live_FM_z + Dead_FM_z +
+          LiveB_z + DeadB_z + LitterB_z,
+  data = fb_noninvaded,
+  family = student(),
+  prior = priors,
+  chains = 4,
+  iter = 4000,
+  warmup = 1000,
+  cores = 4,
+  control = list(adapt_delta = 0.95)
+)
+
+summary(sfl_model_inv)
+summary(sfl_model_noninv)
+```
+
+## Flame Length Model Comparison
+```{r compare_S_FL, echo=FALSE}
+# Posterior summaries
+posterior_summary(sfl_model_inv)
+posterior_summary(sfl_model_noninv)
+```
+
+## Surface Flame Length Figure
+```{r surface_flame_length_Figure, echo=FALSE}
+tidy_inv <- tidy(sfl_model_inv, conf.int = TRUE) %>%
+  mutate(group = "Invaded")
+tidy_noninv <- tidy(sfl_model_noninv, conf.int = TRUE) %>%
+  mutate(group = "Non-Invaded")
+
+
+combined_coeffs <- bind_rows(tidy_inv, tidy_noninv)
+
+plot_data <- combined_coeffs %>%
+  filter(effect == "fixed" & term != "(Intercept)") %>%
+  mutate(
+    term = str_replace(term, "Live_FM_z", "Live Fuel Moisture"),
+    term = str_replace(term, "Dead_FM_z", "Dead Fuel Moisture"),
+    term = str_replace(term, "LiveB_z", "Live Biomass"),
+    term = str_replace(term, "DeadB_z", "Dead Biomass"),
+    term = str_replace(term, "LitterB_z", "Litter Biomass")
+  ) %>%
+  mutate(term = fct_inorder(term) %>% fct_rev())
+
+dodge <- position_dodge(width = 0.6)
+
+coefficient_plot_sfl <- ggplot(plot_data, aes(x = estimate, y = term, color = group)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey70") +
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high), height = 0, linewidth = 0.8, position = dodge) +
+  geom_point(aes(shape = group), size = 3.5, position = dodge) +
+  labs(
+    x = "Standardized Regression Coefficients (β)",
+    y = NULL,
+    color = "Site Status"
+  ) +
+  scale_color_manual(values = c("Invaded" = "coral", "Non-Invaded" = "steelblue")) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "bottom",
+    panel.grid.major.y = element_blank()
+  )
+
+print(coefficient_plot_sfl)
+
+
+plot_data_with_labels_sfl <- plot_data %>%
+  mutate(
+    label_text = paste0("β = ", round(estimate, 2),
+                        ", 95% CI [", round(conf.low, 2), ", ", round(conf.high, 2), "]")
+  )
+
+plot_data_with_labels_sfl <- plot_data_with_labels_sfl %>%
+  mutate(signif = conf.low * conf.high > 0)
+
+dodge <- position_dodge(width = 0.6)
+
+
+clean_plot_sfl <- ggplot(
+  plot_data_with_labels_sfl,
+  aes(x = estimate, y = term, color = group)
+) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey70") +
+  geom_errorbarh(
+    aes(xmin = conf.low, xmax = conf.high),
+    height = 0, linewidth = 0.8, position = dodge
+  ) +
+  geom_point(size = 3.5, position = dodge, alpha = 0.8) +
+  scale_color_manual(values = c("Invaded" = "coral", "Non-Invaded" = "steelblue")) +
+  coord_cartesian(
+    xlim = c(min(plot_data_with_labels_sfl$conf.low) - 1.0,
+             max(plot_data_with_labels_sfl$conf.high) + 1.0)
+  ) +
+  labs(
+    x = "Standardized Regression Coefficients (β)",
+    y = NULL,
+    color = "Site Status"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "bottom",
+    panel.grid.major.y = element_blank()
+  )
+
+print(clean_plot_sfl)
+
+```
+
+
+## GLMM Surface Fireline Intensity
+```{r GLMM_Sur_FI, echo=FALSE}
+# Fit Bayesian regression for invaded sites
+sfin_model_inv <- brm(
+  S_Fin ~ Live_FM_z + Dead_FM_z +
+          LiveB_z + DeadB_z + LitterB_z,
+  data = fb_invaded,
+  family = student(),
+  prior = priors,
+  chains = 4,
+  iter = 4000,
+  warmup = 1000,
+  cores = 4,
+  control = list(adapt_delta = 0.95)
+)
+
+# Fit Bayesian regression for non-invaded sites
+sfin_model_noninv <- brm(
+  S_Fin ~ Live_FM_z + Dead_FM_z +
+          LiveB_z + DeadB_z + LitterB_z,
+  data = fb_noninvaded,
+  family = student(),
+  prior = priors,
+  chains = 4,
+  iter = 4000,
+  warmup = 1000,
+  cores = 4,
+  control = list(adapt_delta = 0.95)
+)
+
+
+summary(sfin_model_inv)
+summary(sfin_model_noninv)
+```
+
+
+## Fireline Intensity Model Comparison
+```{r compare_S_FI, echo=FALSE}
+# Posterior summaries
+posterior_summary(sfin_model_inv)
+posterior_summary(sfin_model_noninv)
+
+```
+
+## Surface Fireline Intensity Figure
+```{r surface_fireline_intensity_figure, echo=FALSE}
+tidy_inv <- tidy(sfin_model_inv, conf.int = TRUE) %>%
+  mutate(group = "Invaded")
+
+tidy_noninv <- tidy(sfin_model_noninv, conf.int = TRUE) %>%
+  mutate(group = "Non-Invaded")
+
+combined_coeffs <- bind_rows(tidy_inv, tidy_noninv)
+
+plot_data <- combined_coeffs %>%
+  filter(effect == "fixed" & term != "(Intercept)") %>%
+  mutate(
+    term = str_replace(term, "Live_FM_z", "Live Fuel Moisture"),
+    term = str_replace(term, "Dead_FM_z", "Dead Fuel Moisture"),
+    term = str_replace(term, "LiveB_z", "Live Biomass"),
+    term = str_replace(term, "DeadB_z", "Dead Biomass"),
+    term = str_replace(term, "LitterB_z", "Litter Biomass")
+  ) %>%
+  mutate(term = fct_inorder(term) %>% fct_rev())
+
+dodge <- position_dodge(width = 0.6)
+
+coefficient_plot_sfin <- ggplot(plot_data, aes(x = estimate, y = term, color = group)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey70") +
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high), height = 0, linewidth = 0.8, position = dodge) +
+  geom_point(aes(shape = group), size = 3.5, position = dodge) +
+  labs(
+    x = "Standardized Regression Coefficients (β)",
+    y = NULL,
+    color = "Site Status"
+  ) +
+  scale_color_manual(values = c("Invaded" = "coral", "Non-Invaded" = "steelblue")) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "bottom",
+    panel.grid.major.y = element_blank()
+  )
+
+print(coefficient_plot_sfin)
+
+plot_data_with_labels_sfin <- plot_data %>%
+  mutate(
+    label_text = paste0("β = ", round(estimate, 2),
+                        ", 95% CI [", round(conf.low, 2), ", ", round(conf.high, 2), "]")
+  )
+
+plot_data_with_labels_sfin <- plot_data_with_labels_sfin %>%
+  mutate(signif = conf.low * conf.high > 0)
+
+dodge <- position_dodge(width = 0.6)
+
+clean_plot_sfin <- ggplot(
+  plot_data_with_labels_sfin,
+  aes(x = estimate, y = term, color = group)
+) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey70") +
+  geom_errorbarh(
+    aes(xmin = conf.low, xmax = conf.high),
+    height = 0, linewidth = 0.8, position = dodge
+  ) +
+  geom_point(size = 3.5, position = dodge, alpha = 0.8) +
+  scale_color_manual(values = c("Invaded" = "coral", "Non-Invaded" = "steelblue")) +
+  coord_cartesian(
+    xlim = c(min(plot_data_with_labels_sfin$conf.low) - 1.0,
+             max(plot_data_with_labels_sfin$conf.high) + 1.0)
+  ) +
+  labs(
+    x = "Standardized Regression Coefficients (β)",
+    y = NULL,
+    color = "Site Status"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "bottom",
+    panel.grid.major.y = element_blank()
+  )
+
+print(clean_plot_sfin)
+
+```
+
+
+## GLMM Crown Transition Ratio
+```{r GLMM_Crown_Transition_Ratio, echo=FALSE}
+# Fit Bayesian regression for invaded sites
+ctr_model_inv <- brm(
+  C_TR ~ Live_FM_z + Dead_FM_z +
+    LiveB_z + DeadB_z + LitterB_z + TreeBH_z,
+  data = fb_invaded,
+  family = student(),
+  prior = priors,
+  chains = 4,
+  iter = 4000,
+  warmup = 1000,
+  cores = 4,
+  control = list(adapt_delta = 0.95)
+)
+
+# Fit Bayesian regression for non-invaded sites
+ctr_model_noninv <- brm(
+  C_TR ~ Live_FM_z + Dead_FM_z +
+    LiveB_z + DeadB_z + LitterB_z + TreeBH_z,
+  data = fb_noninvaded,
+  family = student(),
+  prior = priors,
+  chains = 4,
+  iter = 4000,
+  warmup = 1000,
+  cores = 4,
+  control = list(adapt_delta = 0.95)
+)
+
+
+summary(ctr_model_inv)
+summary(ctr_model_noninv)
+```
+
+## Crown Transition Ratio Model Comparison
+```{r compare_Crown_TR, echo=FALSE}
+posterior_summary(ctr_model_inv)
+posterior_summary(ctr_model_noninv)
+
+```
+
+## Transition Ratio Figure
+```{r transition_ratio_figure, echo=FALSE}
+tidy_inv <- tidy(ctr_model_inv, conf.int = TRUE) %>%
+  mutate(group = "Invaded")
+
+tidy_noninv <- tidy(ctr_model_noninv, conf.int = TRUE) %>%
+  mutate(group = "Non-Invaded")
+
+combined_coeffs <- bind_rows(tidy_inv, tidy_noninv)
+
+plot_data <- combined_coeffs %>%
+  filter(effect == "fixed" & term != "(Intercept)") %>%
+  mutate(
+    term = str_replace(term, "Live_FM_z", "Live Fuel Moisture"),
+    term = str_replace(term, "Dead_FM_z", "Dead Fuel Moisture"),
+    term = str_replace(term, "LiveB_z", "Live Biomass"),
+    term = str_replace(term, "DeadB_z", "Dead Biomass"),
+    term = str_replace(term, "LitterB_z", "Litter Biomass"),
+    term = str_replace(term, "TreeBH_z", "Canopy Base Height")
+  ) %>%
+  mutate(term = fct_inorder(term) %>% fct_rev())
+
+dodge <- position_dodge(width = 0.6)
+
+coefficient_plot_ctr <- ggplot(plot_data, aes(x = estimate, y = term, color = group)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey70") +
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high), height = 0, linewidth = 0.8, position = dodge) +
+  geom_point(aes(shape = group), size = 3.5, position = dodge) +
+  labs(
+    x = "Standardized Regression Coefficients (β)",
+    y = NULL,
+    color = "Site Status"
+  ) +
+  scale_color_manual(values = c("Invaded" = "coral", "Non-Invaded" = "steelblue")) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "bottom",
+    panel.grid.major.y = element_blank()
+  )
+
+print(coefficient_plot_ctr)
+
+plot_data_with_labels_ctr <- plot_data %>%
+  mutate(
+    label_text = paste0("β = ", round(estimate, 2),
+                        ", 95% CI [", round(conf.low, 2), ", ", round(conf.high, 2), "]")
+  )
+
+plot_data_with_labels_ctr <- plot_data_with_labels_ctr %>%
+  mutate(signif = conf.low * conf.high > 0)
+
+dodge <- position_dodge(width = 0.6)
+
+clean_plot_ctr <- ggplot(
+  plot_data_with_labels_ctr,
+  aes(x = estimate, y = term, color = group)
+) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey70") +
+  geom_errorbarh(
+    aes(xmin = conf.low, xmax = conf.high),
+    height = 0, linewidth = 0.8, position = dodge
+  ) +
+  geom_point(size = 3.5, position = dodge, alpha = 0.8) +
+  scale_color_manual(values = c("Invaded" = "coral", "Non-Invaded" = "steelblue")) +
+  coord_cartesian(
+    xlim = c(min(plot_data_with_labels_ctr$conf.low) - 1.0,
+             max(plot_data_with_labels_ctr$conf.high) + 1.0)
+  ) +
+  labs(
+    x = "Standardized Regression Coefficients (β)",
+    y = NULL,
+    color = "Site Status"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "bottom",
+    panel.grid.major.y = element_blank()
+  )
+
+print(clean_plot_ctr)
+
+```
+
+
+## GLMM Crown Fire Active Ratio
+```{r GLMM_Crown_Fire_Active_Ratio, eval=FALSE, include=FALSE}
+
+# Fit Bayesian regression for invaded sites
+car_model_inv <- brm(
+  C_AR ~ Live_FM_z + Dead_FM_z,
+  data = fb_invaded,
+  family = student(),
+  prior = priors,
+  chains = 4,
+  iter = 4000,
+  warmup = 1000,
+  cores = 4,
+  control = list(adapt_delta = 0.95)
+)
+
+# Fit Bayesian regression for non-invaded sites
+car_model_noninv <- brm(
+  C_AR ~ Live_FM_z + Dead_FM_z,
+  data = fb_noninvaded,
+  family = student(),
+  prior = priors,
+  chains = 4,
+  iter = 4000,
+  warmup = 1000,
+  cores = 4,
+  control = list(adapt_delta = 0.95)
+)
+
+```
+
+## Crown Fire Active Ratio Model Comparison
+```{r compare_Crown_AR, eval=FALSE, include=FALSE}
+posterior_summary(car_model_inv)
+posterior_summary(car_model_noninv)
+```
+
+## Active Ratio Figure
+```{r active_ratio_Figure, eval=FALSE, include=FALSE}
+tidy_inv <- tidy(car_model_inv, conf.int = TRUE) %>%
+  mutate(group = "Invaded")
+
+tidy_noninv <- tidy(car_model_noninv, conf.int = TRUE) %>%
+  mutate(group = "Non-Invaded")
+
+combined_coeffs <- bind_rows(tidy_inv, tidy_noninv)
+
+plot_data <- combined_coeffs %>%
+  filter(effect == "fixed" & term != "(Intercept)") %>%
+  mutate(
+    term = str_replace(term, "Live_FM_z", "Live Fuel Moisture"),
+    term = str_replace(term, "Dead_FM_z", "Dead Fuel Moisture")
+  ) %>%
+  mutate(term = fct_inorder(term) %>% fct_rev())
+
+dodge <- position_dodge(width = 0.6)
+
+coefficient_plot_car <- ggplot(plot_data, aes(x = estimate, y = term, color = group)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey70") +
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high), height = 0, linewidth = 0.8, position = dodge) +
+  geom_point(aes(shape = group), size = 3.5, position = dodge) +
+  labs(
+    x = "Standardized Regression Coefficients (β)",
+    y = NULL,
+    color = "Site Status"
+  ) +
+  scale_color_manual(values = c("Invaded" = "coral", "Non-Invaded" = "steelblue")) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "bottom",
+    panel.grid.major.y = element_blank()
+  )
+
+print(coefficient_plot_car)
+
+plot_data_with_labels_car <- plot_data %>%
+  mutate(
+    label_text = paste0("β = ", round(estimate, 2),
+                        ", 95% CI [", round(conf.low, 2), ", ", round(conf.high, 2), "]")
+  )
+
+plot_data_with_labels_car <- plot_data_with_labels_car %>%
+  mutate(signif = conf.low * conf.high > 0)
+
+dodge <- position_dodge(width = 0.6)
+
+
+clean_plot_car <- ggplot(
+  plot_data_with_labels_car,
+  aes(x = estimate, y = term, color = group)
+) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey70") +
+  geom_errorbarh(
+    aes(xmin = conf.low, xmax = conf.high),
+    height = 0, linewidth = 0.8, position = dodge
+  ) +
+  geom_point(size = 3.5, position = dodge, alpha = 0.8) +
+  scale_color_manual(values = c("Invaded" = "coral", "Non-Invaded" = "steelblue")) +
+  coord_cartesian(
+    xlim = c(min(plot_data_with_labels_car$conf.low) - 1.0,
+             max(plot_data_with_labels_car$conf.high) + 1.0)
+  ) +
+  labs(
+    x = "Standardized Regression Coefficients (β)",
+    y = NULL,
+    color = "Site Status"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "bottom",
+    panel.grid.major.y = element_blank()
+  )
+
+print(clean_plot_car)
+
+```
+
+
+## GLMM Crown Fire Rate of Spread
+```{r GLMM_Crown_Fire_Rate_of_Spread, eval=FALSE, include=FALSE}
+
+# Fit Bayesian regression for invaded sites
+cros_model_inv <- brm(
+  C_ROS ~ Live_FM_z + Dead_FM_z,
+  data = fb_invaded,
+  family = student(),
+  prior = priors,
+  chains = 4,
+  iter = 4000,
+  warmup = 1000,
+  cores = 4,
+  control = list(adapt_delta = 0.95)
+)
+
+# Fit Bayesian regression for non-invaded sites
+cros_model_noninv <- brm(
+  C_ROS ~ Live_FM_z + Dead_FM_z,
+  data = fb_noninvaded,
+  family = student(),
+  prior = priors,
+  chains = 4,
+  iter = 4000,
+  warmup = 1000,
+  cores = 4,
+  control = list(adapt_delta = 0.95)
+)
+
+
+```
+
+## Crown Fire Rate of Spread Model Comparison
+```{r compare_Crown_ROS, eval=FALSE, include=FALSE}
+posterior_summary(cros_model_inv)
+posterior_summary(cros_model_noninv)
+
+```
+
+## Crown Fire Rate of Spread Figure
+```{r crown_ROS_figure, eval=FALSE, include=FALSE}
+tidy_inv <- tidy(cros_model_inv, conf.int = TRUE) %>%
+  mutate(group = "Invaded")
+
+tidy_noninv <- tidy(cros_model_noninv, conf.int = TRUE) %>%
+  mutate(group = "Non-Invaded")
+
+combined_coeffs <- bind_rows(tidy_inv, tidy_noninv)
+
+plot_data <- combined_coeffs %>%
+  filter(effect == "fixed" & term != "(Intercept)") %>%
+  mutate(
+    term = str_replace(term, "Live_FM_z", "Live Fuel Moisture"),
+    term = str_replace(term, "Dead_FM_z", "Dead Fuel Moisture")
+  ) %>%
+  mutate(term = fct_inorder(term) %>% fct_rev())
+
+dodge <- position_dodge(width = 0.6)
+
+coefficient_plot_cros <- ggplot(plot_data, aes(x = estimate, y = term, color = group)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey70") +
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high), height = 0, linewidth = 0.8, position = dodge) +
+  geom_point(aes(shape = group), size = 3.5, position = dodge) +
+  labs(
+    x = "Standardized Regression Coefficients (β)",
+    y = NULL,
+    color = "Site Status"
+  ) +
+  scale_color_manual(values = c("Invaded" = "coral", "Non-Invaded" = "steelblue")) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "bottom",
+    panel.grid.major.y = element_blank()
+  )
+
+print(coefficient_plot_cros)
+
+plot_data_with_labels_cros <- plot_data %>%
+  mutate(
+    label_text = paste0("β = ", round(estimate, 2),
+                        ", 95% CI [", round(conf.low, 2), ", ", round(conf.high, 2), "]")
+  )
+
+plot_data_with_labels_cros <- plot_data_with_labels_cros %>%
+  mutate(signif = conf.low * conf.high > 0)
+
+dodge <- position_dodge(width = 0.6)
+
+clean_plot_cros <- ggplot(
+  plot_data_with_labels_ctr,
+  aes(x = estimate, y = term, color = group)
+) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey70") +
+  geom_errorbarh(
+    aes(xmin = conf.low, xmax = conf.high),
+    height = 0, linewidth = 0.8, position = dodge
+  ) +
+  geom_point(size = 3.5, position = dodge, alpha = 0.8) +
+  scale_color_manual(values = c("Invaded" = "coral", "Non-Invaded" = "steelblue")) +
+  coord_cartesian(
+    xlim = c(min(plot_data_with_labels_cros$conf.low) - 1.0,
+             max(plot_data_with_labels_cros$conf.high) + 1.0)
+  ) +
+  labs(
+    x = "Standardized Regression Coefficients (β)",
+    y = NULL,
+    color = "Site Status"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "bottom",
+    panel.grid.major.y = element_blank()
+  )
+
+print(clean_plot_cros)
+```
+
+## GLMM Crown Fire Intensity
+```{r GLMM_Crown_Fire_Intensity, eval=FALSE, include=FALSE}
+
+# Fit Bayesian regression for invaded sites
+cfin_model_inv <- brm(
+  C_Fin ~ Live_FM_z + Dead_FM_z +
+    LiveB_z + DeadB_z + LitterB_z + TreeBH_z,
+  data = fb_invaded,
+  family = student(),
+  prior = priors,
+  chains = 4,
+  iter = 4000,
+  warmup = 1000,
+  cores = 4,
+  control = list(adapt_delta = 0.95)
+)
+
+# Fit Bayesian regression for non-invaded sites
+cfin_model_noninv <- brm(
+  C_Fin ~ Live_FM_z + Dead_FM_z +
+    LiveB_z + DeadB_z + LitterB_z + TreeBH_z,
+  data = fb_noninvaded,
+  family = student(),
+  prior = priors,
+  chains = 4,
+  iter = 4000,
+  warmup = 1000,
+  cores = 4,
+  control = list(adapt_delta = 0.95)
+)
+
+```
+
+## Crown Fire Intensity Model Comparison
+```{r compare_Crown_Fin, eval=FALSE, include=FALSE}
+posterior_summary(cfin_model_inv)
+posterior_summary(cfin_model_noninv)
+
+```
+
+## Crown Fire Intensity Figure
+```{r crown_FI_figure, eval=FALSE, include=FALSE}
+tidy_inv <- tidy(cfin_model_inv, conf.int = TRUE) %>%
+  mutate(group = "Invaded")
+
+tidy_noninv <- tidy(cfin_model_noninv, conf.int = TRUE) %>%
+  mutate(group = "Non-Invaded")
+
+combined_coeffs <- bind_rows(tidy_inv, tidy_noninv)
+
+plot_data <- combined_coeffs %>%
+  filter(effect == "fixed" & term != "(Intercept)") %>%
+  mutate(
+    term = str_replace(term, "Live_FM_z", "Live Fuel Moisture"),
+    term = str_replace(term, "Dead_FM_z", "Dead Fuel Moisture"),
+    term = str_replace(term, "LiveB_z", "Live Biomass"),
+    term = str_replace(term, "DeadB_z", "Dead Biomass"),
+    term = str_replace(term, "LitterB_z", "Litter Biomass"),
+    term = str_replace(term, "TreeBH_z", "Canopy Base Height")
+  ) %>%
+  mutate(term = fct_inorder(term) %>% fct_rev())
+
+dodge <- position_dodge(width = 0.6)
+
+coefficient_plot_cfin <- ggplot(plot_data, aes(x = estimate, y = term, color = group)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey70") +
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high), height = 0, linewidth = 0.8, position = dodge) +
+  geom_point(aes(shape = group), size = 3.5, position = dodge) +
+  labs(
+    x = "Standardized Regression Coefficients (β)",
+    y = NULL,
+    color = "Site Status"
+  ) +
+  scale_color_manual(values = c("Invaded" = "coral", "Non-Invaded" = "steelblue")) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "bottom",
+    panel.grid.major.y = element_blank()
+  )
+
+print(coefficient_plot_cfin)
+
+plot_data_with_labels_cfin <- plot_data %>%
+  mutate(
+    label_text = paste0("β = ", round(estimate, 2),
+                        ", 95% CI [", round(conf.low, 2), ", ", round(conf.high, 2), "]")
+  )
+
+plot_data_with_labels_cfin <- plot_data_with_labels_cfin %>%
+  mutate(signif = conf.low * conf.high > 0)
+
+dodge <- position_dodge(width = 0.6)
+
+
+clean_plot_cfin <- ggplot(
+  plot_data_with_labels_cfin,
+  aes(x = estimate, y = term, color = group)
+) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey70") +
+  geom_errorbarh(
+    aes(xmin = conf.low, xmax = conf.high),
+    height = 0, linewidth = 0.8, position = dodge
+  ) +
+  geom_point(size = 3.5, position = dodge, alpha = 0.8) +
+  scale_color_manual(values = c("Invaded" = "coral", "Non-Invaded" = "steelblue")) +
+  coord_cartesian(
+    xlim = c(min(plot_data_with_labels_cfin$conf.low) - 1.0,
+             max(plot_data_with_labels_cfin$conf.high) + 1.0)
+  ) +
+  labs(
+    x = "Standardized Regression Coefficients (β)",
+    y = NULL,
+    color = "Site Status"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "bottom",
+    panel.grid.major.y = element_blank()
+  )
+
+print(clean_plot_cfin)
+```
+
+
+## GLMM Crown Fire Flame Length
+```{r GLMM_Crown_Fire_Flame_Length, eval=FALSE, include=FALSE}
+
+# Fit Bayesian regression for invaded sites
+cfl_model_inv <- brm(
+  C_FL ~ Live_FM_z + Dead_FM_z +
+    LiveB_z + DeadB_z + LitterB_z + TreeBH_z,
+  data = fb_invaded,
+  family = student(),
+  prior = priors,
+  chains = 4,
+  iter = 4000,
+  warmup = 1000,
+  cores = 4,
+  control = list(adapt_delta = 0.95)
+)
+
+# Fit Bayesian regression for non-invaded sites
+cfl_model_noninv <- brm(
+  C_FL ~ Live_FM_z + Dead_FM_z +
+    LiveB_z + DeadB_z + LitterB_z + TreeBH_z,
+  data = fb_noninvaded,
+  family = student(),
+  prior = priors,
+  chains = 4,
+  iter = 4000,
+  warmup = 1000,
+  cores = 4,
+  control = list(adapt_delta = 0.95)
+)
+
+```
+
+## Crown Fire Flame Length Model Comparison
+```{r compare_Crown_FL, eval=FALSE, include=FALSE}
+posterior_summary(cfl_model_inv)
+posterior_summary(cfl_model_noninv)
+```
+
+## Crown Flame Length Figure
+```{r crown_fl_figure, eval=FALSE, include=FALSE}
+tidy_inv <- tidy(cfl_model_inv, conf.int = TRUE) %>%
+  mutate(group = "Invaded")
+
+tidy_noninv <- tidy(cfl_model_noninv, conf.int = TRUE) %>%
+  mutate(group = "Non-Invaded")
+  
+combined_coeffs <- bind_rows(tidy_inv, tidy_noninv)
+
+plot_data <- combined_coeffs %>%
+  filter(effect == "fixed" & term != "(Intercept)") %>%
+  mutate(
+    term = str_replace(term, "Live_FM_z", "Live Fuel Moisture"),
+    term = str_replace(term, "Dead_FM_z", "Dead Fuel Moisture"),
+    term = str_replace(term, "LiveB_z", "Live Biomass"),
+    term = str_replace(term, "DeadB_z", "Dead Biomass"),
+    term = str_replace(term, "LitterB_z", "Litter Biomass"),
+    term = str_replace(term, "TreeBH_z", "Canopy Base Height")
+  ) %>%
+  mutate(term = fct_inorder(term) %>% fct_rev())
+
+dodge <- position_dodge(width = 0.6)
+
+coefficient_plot_cfl <- ggplot(plot_data, aes(x = estimate, y = term, color = group)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey70") +
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high), height = 0, linewidth = 0.8, position = dodge) +
+  geom_point(aes(shape = group), size = 3.5, position = dodge) +
+  labs(
+    x = "Standardized Regression Coefficients (β)",
+    y = NULL,
+    color = "Site Status"
+  ) +
+  scale_color_manual(values = c("Invaded" = "coral", "Non-Invaded" = "steelblue")) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "bottom",
+    panel.grid.major.y = element_blank()
+  )
+
+print(coefficient_plot_cfl)
+
+plot_data_with_labels_cfl <- plot_data %>%
+  mutate(
+    label_text = paste0("β = ", round(estimate, 2),
+                        ", 95% CI [", round(conf.low, 2), ", ", round(conf.high, 2), "]")
+  )
+
+plot_data_with_labels_cfl <- plot_data_with_labels_cfl %>%
+  mutate(signif = conf.low * conf.high > 0)
+
+dodge <- position_dodge(width = 0.6)
+
+clean_plot_cfl <- ggplot(
+  plot_data_with_labels_cfl,
+  aes(x = estimate, y = term, color = group)
+) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey70") +
+  geom_errorbarh(
+    aes(xmin = conf.low, xmax = conf.high),
+    height = 0, linewidth = 0.8, position = dodge
+  ) +
+  geom_point(size = 3.5, position = dodge, alpha = 0.8) +
+  scale_color_manual(values = c("Invaded" = "coral", "Non-Invaded" = "steelblue")) +
+  coord_cartesian(
+    xlim = c(min(plot_data_with_labels_cfl$conf.low) - 1.0,
+             max(plot_data_with_labels_cfl$conf.high) + 1.0)
+  ) +
+  labs(
+    x = "Standardized Regression Coefficients (β)",
+    y = NULL,
+    color = "Site Status"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "bottom",
+    panel.grid.major.y = element_blank()
+  )
+
+print(clean_plot_cfl)
+```
+
+## Table Creation
+```{r table_creation, eval=FALSE, include=FALSE}
+create_posterior_table <- function(model, title, file_path) {
+  
+  draws <- as_draws_df(model)
+  
+  summary_df <- summarise_draws(
+    draws,
+    Estimate = median,
+    "Est. Error" = mad,
+    "CI_lower" = ~quantile(.x, probs = 0.025),
+    "CI_upper" = ~quantile(.x, probs = 0.975),
+    "pd" = ~max(mean(.x > 0), mean(.x < 0)),
+    "R-hat" = rhat,
+    "Bulk ESS" = ess_bulk,
+    "Tail ESS" = ess_tail
+  )
+  
+  summary_df_clean <- summary_df %>%
+    filter(grepl("^b_", variable)) %>%
+    mutate(
+      Parameter = gsub("b_", "", variable),
+      Parameter = gsub(":", " x ", Parameter)
+    ) %>%
+    select(
+      Parameter, 
+      Estimate, 
+      `Est. Error`, 
+      `2.5%`, 
+      `97.5%`,
+      pd, 
+      `Bulk ESS`, 
+      `Tail ESS`, 
+      `R-hat`
+    ) %>%
+    mutate(Parameter = fct_relevel(Parameter, "Intercept")) %>%
+    arrange(Parameter) %>%
+    rename(
+      `95% CI (Lower)` = `2.5%`,
+      `95% CI (Upper)` = `97.5%`
+    )
+  
+  gt_table <- summary_df_clean %>%
+    mutate(Significant = (`95% CI (Lower)` > 0 | `95% CI (Upper)` < 0)) %>%
+    gt(rowname_col = "Parameter") %>%
+    fmt_number(
+      columns = c("Estimate", "Est. Error", "95% CI (Lower)", "95% CI (Upper)"),
+      decimals = 2
+    ) %>%
+    fmt_number(
+      columns = c("pd", "R-hat"),
+      decimals = 3
+    ) %>%
+    fmt_number(
+      columns = c("Bulk ESS", "Tail ESS"),
+      decimals = 0,
+      use_seps = TRUE 
+    ) %>%
+    tab_style(
+      style = cell_text(weight = "bold"),
+      locations = cells_body(rows = Significant == TRUE)
+    ) %>%
+    cols_hide(columns = "Significant") %>%
+    tab_header(title = title)
+  
+  print(gt_table)
+  gtsave(gt_table, file_path)
+}
+
+
+# ROS model
+
+create_posterior_table(
+  sros_model_inv,
+  title = "Posterior Estimates for Surface Rate of Spread (Invaded)",
+  file_path = "C:/Users/DrewIvory/OneDrive - University of Florida/Desktop/School/PHD/01_Projects/01_FuelDynamics/02_Data/Regression/S_ROS_Invaded.rtf"
+)
+
+# For non-invaded ROS model
+create_posterior_table(
+  sros_model_noninv,
+  title = "Posterior Estimates for Surface Rate of Spread (Non-Invaded)",
+  file_path = "C:/Users/DrewIvory/OneDrive - University of Florida/Desktop/School/PHD/01_Projects/01_FuelDynamics/02_Data/Regression/S_ROS_NonInvaded.rtf"
+)
+
+# Flame Length model
+create_posterior_table(
+  sfl_model_inv,
+  title = "Posterior Estimates for Surface Flame Length (Invaded)",
+  file_path = "C:/Users/DrewIvory/OneDrive - University of Florida/Desktop/School/PHD/01_Projects/01_FuelDynamics/02_Data/Regression/S_FL_Invaded.rtf"
+)
+
+# For non-invaded FL model
+create_posterior_table(
+  sfl_model_noninv,
+  title = "Posterior Estimates for Surface Flame Length (Non-Invaded)",
+  file_path = "C:/Users/DrewIvory/OneDrive - University of Florida/Desktop/School/PHD/01_Projects/01_FuelDynamics/02_Data/Regression/S_FL_NonInvaded.rtf"
+)
+
+# Fireline Intensity model
+create_posterior_table(
+  sfin_model_inv,
+  title = "Posterior Estimates for Surface Fireline Intensity (Invaded)",
+  file_path = "C:/Users/DrewIvory/OneDrive - University of Florida/Desktop/School/PHD/01_Projects/01_FuelDynamics/02_Data/Regression/S_FI_Invaded.rtf"
+)
+
+# For non-invaded FL model
+create_posterior_table(
+  sfin_model_noninv,
+  title = "Posterior Estimates for Surface Fireline Intensity (Non-Invaded)",
+  file_path = "C:/Users/DrewIvory/OneDrive - University of Florida/Desktop/School/PHD/01_Projects/01_FuelDynamics/02_Data/Regression/S_FI_NonInvaded.rtf"
+)
+
+# Crown Transition Ratio model
+create_posterior_table(
+  ctr_model_inv,
+  title = "Posterior Estimates for Crown Transition Ratio (Invaded)",
+  file_path = "C:/Users/DrewIvory/OneDrive - University of Florida/Desktop/School/PHD/01_Projects/01_FuelDynamics/02_Data/Regression/C_TR_Invaded.rtf"
+)
+
+# For non-invaded C_TR model
+create_posterior_table(
+  ctr_model_noninv,
+  title = "Posterior Estimates for Crown Transition Ratio (Non-Invaded)",
+  file_path = "C:/Users/DrewIvory/OneDrive - University of Florida/Desktop/School/PHD/01_Projects/01_FuelDynamics/02_Data/Regression/C_TR_NonInvaded.rtf"
+)
+
+# Crown Active Ratio model
+create_posterior_table(
+  car_model_inv,
+  title = "Posterior Estimates for Crown Active Ratio (Invaded)",
+  file_path = "C:/Users/DrewIvory/OneDrive - University of Florida/Desktop/School/PHD/01_Projects/01_FuelDynamics/02_Data/Regression/C_AR_Invaded.docx"
+)
+
+# For non-invaded C_AR model
+create_posterior_table(
+  car_model_noninv,
+  title = "Posterior Estimates for Crown Active Ratio (Non-Invaded)",
+  file_path = "C:/Users/DrewIvory/OneDrive - University of Florida/Desktop/School/PHD/01_Projects/01_FuelDynamics/02_Data/Regression/C_AR_NonInvaded.docx"
+)
+
+# Crown Rate of Spread model
+create_posterior_table(
+  cros_model_inv,
+  title = "Posterior Estimates for Crown Rate of Spread (Invaded)",
+  file_path = "C:/Users/DrewIvory/OneDrive - University of Florida/Desktop/School/PHD/01_Projects/01_FuelDynamics/02_Data/Regression/C_ROS_Invaded.docx"
+)
+
+# For non-invaded C_ROS model
+create_posterior_table(
+  cros_model_noninv,
+  title = "Posterior Estimates for Crown Rate of Spread (Non-Invaded)",
+  file_path = "C:/Users/DrewIvory/OneDrive - University of Florida/Desktop/School/PHD/01_Projects/01_FuelDynamics/02_Data/Regression/C_ROS_NonInvaded.docx"
+)
+
+# Crown Fire Intensity model
+
+create_posterior_table(
+  cfin_model_inv,
+  title = "Posterior Estimates for Crown Fire Intensity (Invaded)",
+  file_path = "C:/Users/DrewIvory/OneDrive - University of Florida/Desktop/School/PHD/01_Projects/01_FuelDynamics/02_Data/Regression/C_Fin_Invaded.docx"
+)
+
+# For non-invaded C_Fin model
+create_posterior_table(
+  cfin_model_noninv,
+  title = "Posterior Estimates for Crown Fire Intensity (Non-Invaded)",
+  file_path = "C:/Users/DrewIvory/OneDrive - University of Florida/Desktop/School/PHD/01_Projects/01_FuelDynamics/02_Data/Regression/C_Fin_NonInvaded.docx"
+)
+
+# Crown Flame Length model
+
+create_posterior_table(
+  cfl_model_inv,
+  title = "Posterior Estimates for Crown Flame Length (Invaded)",
+  file_path = "C:/Users/DrewIvory/OneDrive - University of Florida/Desktop/School/PHD/01_Projects/01_FuelDynamics/02_Data/Regression/C_FL_Invaded.docx"
+)
+
+# For non-invaded C_FL model
+create_posterior_table(
+  cfl_model_noninv,
+  title = "Posterior Estimates for Crown Flame Length (Non-Invaded)",
+  file_path = "C:/Users/DrewIvory/OneDrive - University of Florida/Desktop/School/PHD/01_Projects/01_FuelDynamics/02_Data/Regression/C_FL_NonInvaded.docx"
+)
+```
+
+## Coefficient Plots
+```{r coefficient_plots, eval=FALSE, include=FALSE}
+clean_plot_sros <- ggplot(
+  plot_data_with_labels_sros,
+  aes(x = estimate, y = term, color = group)
+) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey70") +
+  geom_errorbarh(
+    aes(xmin = conf.low, xmax = conf.high),
+    height = 0, linewidth = 0.8, position = dodge
+  ) +
+  geom_point(
+  aes(shape = signif),
+  size = 3.5,
+  position = dodge,
+  alpha = 0.8
+) +
+scale_shape_manual(
+  values = c(`TRUE` = 16,
+             `FALSE` = 1)
+) +
+  scale_color_manual(values = c("Invaded" = "coral", "Non-Invaded" = "steelblue")) +
+  guides(shape = "none") +   
+  coord_cartesian(
+    xlim = c(min(plot_data_with_labels_sros$conf.low) - 1.0,
+             max(plot_data_with_labels_sros$conf.high) + 1.0)
+  ) +
+  labs(
+    x = "Standardized Regression Coefficients (β)",
+    y = NULL,
+    color = "Site Status"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "bottom",
+    panel.grid.major.y = element_blank()
+  )
+
+print(clean_plot_sros)
+
+clean_plot_sfl <- ggplot(
+  plot_data_with_labels_sfl,
+  aes(x = estimate, y = term, color = group)
+) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey70") +
+  geom_errorbarh(
+    aes(xmin = conf.low, xmax = conf.high),
+    height = 0, linewidth = 0.8, position = dodge
+  ) +
+  geom_point(
+  aes(shape = signif),
+  size = 3.5,
+  position = dodge,
+  alpha = 0.8
+) +
+scale_shape_manual(
+  values = c(`TRUE` = 16,
+             `FALSE` = 1)
+) +
+  scale_color_manual(values = c("Invaded" = "coral", "Non-Invaded" = "steelblue")) +
+  guides(shape = "none") +   
+  coord_cartesian(
+    xlim = c(min(plot_data_with_labels_sfl$conf.low) - 1.0,
+             max(plot_data_with_labels_sfl$conf.high) + 1.0)
+  ) +
+  labs(
+    x = "Standardized Regression Coefficients (β)",
+    y = NULL,
+    color = "Site Status"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "bottom",
+    panel.grid.major.y = element_blank()
+  )
+
+clean_plot_sfin <- ggplot(
+  plot_data_with_labels_sfin,
+  aes(x = estimate, y = term, color = group)
+) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey70") +
+  geom_errorbarh(
+    aes(xmin = conf.low, xmax = conf.high),
+    height = 0, linewidth = 0.8, position = dodge
+  ) +
+  geom_point(
+  aes(shape = signif),
+  size = 3.5,
+  position = dodge,
+  alpha = 0.8
+) +
+scale_shape_manual(
+  values = c(`TRUE` = 16,
+             `FALSE` = 1)
+) +
+  scale_color_manual(values = c("Invaded" = "coral", "Non-Invaded" = "steelblue")) +
+  guides(shape = "none") +   
+  coord_cartesian(
+    xlim = c(min(plot_data_with_labels_sfin$conf.low) - 1.0,
+             max(plot_data_with_labels_sfin$conf.high) + 1.0)
+  ) +
+  labs(
+    x = "Standardized Regression Coefficients (β)",
+    y = NULL,
+    color = "Site Status"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "bottom",
+    panel.grid.major.y = element_blank()
+  )
+
+clean_plot_ctr <- ggplot(
+  plot_data_with_labels_ctr,
+  aes(x = estimate, y = term, color = group)
+) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey70") +
+  geom_errorbarh(
+    aes(xmin = conf.low, xmax = conf.high),
+    height = 0, linewidth = 0.8, position = dodge
+  ) +
+  geom_point(
+  aes(shape = signif),
+  size = 3.5,
+  position = dodge,
+  alpha = 0.8
+) +
+scale_shape_manual(
+  values = c(`TRUE` = 16,
+             `FALSE` = 1)
+) +
+  scale_color_manual(values = c("Invaded" = "coral", "Non-Invaded" = "steelblue")) +
+  guides(shape = "none") +   
+  coord_cartesian(
+    xlim = c(min(plot_data_with_labels_ctr$conf.low) - 1.0,
+             max(plot_data_with_labels_ctr$conf.high) + 1.0)
+  ) +
+  labs(
+    x = "Standardized Regression Coefficients (β)",
+    y = NULL,
+    color = "Site Status"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "bottom",
+    panel.grid.major.y = element_blank()
+  )
+
+clean_plot_car <- ggplot(
+  plot_data_with_labels_car,
+  aes(x = estimate, y = term, color = group)
+) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey70") +
+  geom_errorbarh(
+    aes(xmin = conf.low, xmax = conf.high),
+    height = 0, linewidth = 0.8, position = dodge
+  ) +
+  geom_point(
+  aes(shape = signif),
+  size = 3.5,
+  position = dodge,
+  alpha = 0.8
+) +
+scale_shape_manual(
+  values = c(`TRUE` = 16,
+             `FALSE` = 1)
+) +
+  scale_color_manual(values = c("Invaded" = "coral", "Non-Invaded" = "steelblue")) +
+  guides(shape = "none") +   
+  coord_cartesian(
+    xlim = c(min(plot_data_with_labels_car$conf.low) - 1.0,
+             max(plot_data_with_labels_car$conf.high) + 1.0)
+  ) +
+  labs(
+    x = "Standardized Regression Coefficients (β)",
+    y = NULL,
+    color = "Site Status"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "bottom",
+    panel.grid.major.y = element_blank()
+  )
+
+clean_plot_cros <- ggplot(
+  plot_data_with_labels_ctr,
+  aes(x = estimate, y = term, color = group)
+) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey70") +
+  geom_errorbarh(
+    aes(xmin = conf.low, xmax = conf.high),
+    height = 0, linewidth = 0.8, position = dodge
+  ) +
+  geom_point(
+  aes(shape = signif),
+  size = 3.5,
+  position = dodge,
+  alpha = 0.8
+) +
+scale_shape_manual(
+  values = c(`TRUE` = 16,
+             `FALSE` = 1)
+) +
+  scale_color_manual(values = c("Invaded" = "coral", "Non-Invaded" = "steelblue")) +
+  guides(shape = "none") +   
+  coord_cartesian(
+    xlim = c(min(plot_data_with_labels_cros$conf.low) - 1.0,
+             max(plot_data_with_labels_cros$conf.high) + 1.0)
+  ) +
+  labs(
+    x = "Standardized Regression Coefficients (β)",
+    y = NULL,
+    color = "Site Status"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "bottom",
+    panel.grid.major.y = element_blank()
+  )
+
+clean_plot_cfin <- ggplot(
+  plot_data_with_labels_cfin,
+  aes(x = estimate, y = term, color = group)
+) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey70") +
+  geom_errorbarh(
+    aes(xmin = conf.low, xmax = conf.high),
+    height = 0, linewidth = 0.8, position = dodge
+  ) +
+  geom_point(
+  aes(shape = signif),
+  size = 3.5,
+  position = dodge,
+  alpha = 0.8
+) +
+scale_shape_manual(
+  values = c(`TRUE` = 16,
+             `FALSE` = 1)
+) +
+  scale_color_manual(values = c("Invaded" = "coral", "Non-Invaded" = "steelblue")) +
+  guides(shape = "none") +   
+  coord_cartesian(
+    xlim = c(min(plot_data_with_labels_cfin$conf.low) - 1.0,
+             max(plot_data_with_labels_cfin$conf.high) + 1.0)
+  ) +
+  labs(
+    x = "Standardized Regression Coefficients (β)",
+    y = NULL,
+    color = "Site Status"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "bottom",
+    panel.grid.major.y = element_blank()
+  )
+
+clean_plot_cfl <- ggplot(
+  plot_data_with_labels_cfl,
+  aes(x = estimate, y = term, color = group)
+) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey70") +
+  geom_errorbarh(
+    aes(xmin = conf.low, xmax = conf.high),
+    height = 0, linewidth = 0.8, position = dodge
+  ) +
+  geom_point(
+  aes(shape = signif),
+  size = 3.5,
+  position = dodge,
+  alpha = 0.8
+) +
+scale_shape_manual(
+  values = c(`TRUE` = 16,
+             `FALSE` = 1)
+) +
+  scale_color_manual(values = c("Invaded" = "coral", "Non-Invaded" = "steelblue")) +
+  guides(shape = "none") +   
+  coord_cartesian(
+    xlim = c(min(plot_data_with_labels_cfl$conf.low) - 1.0,
+             max(plot_data_with_labels_cfl$conf.high) + 1.0)
+  ) +
+  labs(
+    x = "Standardized Regression Coefficients (β)",
+    y = NULL,
+    color = "Site Status"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "bottom",
+    panel.grid.major.y = element_blank()
+  )
+
+print(clean_plot_cfl)
+```
+
+## Combine Plot using cowplot
+```{r combine_plots, eval=FALSE, include=FALSE}
+
+
+# 1) Put the plots in a list
+plots <- list(
+  clean_plot_sros,
+  clean_plot_sfl,
+  clean_plot_sfin,
+  clean_plot_ctr
+  #clean_plot_car,
+  #clean_plot_cros,
+  #clean_plot_cfin,
+  #clean_plot_cfl
+)
+
+add_tag <- function(plot, tag) {
+  plot +
+    annotate(
+      "text",
+      x = -Inf, y = Inf,
+      label = tag,
+      hjust = -0.5, vjust = 1.5,
+      fontface = "bold", size = 6
+    )
+}
+
+tags <- LETTERS[1:8]
+plots <- Map(add_tag, plots, tags)
+
+# 2) Remove x-axis title from ALL panels
+no_xtitle <- theme(axis.title.x = element_blank())
+plots      <- lapply(plots, `+`, no_xtitle)
+
+
+# 4) Assemble the 4x2 panel grid with legend collected at bottom (of the panels row)
+coef_panels <-
+  (plots[[1]] + plots[[2]]) /
+  (plots[[3]] + plots[[4]]) +
+  #(plots[[5]] + plots[[6]]) /
+  #(plots[[7]] + plots[[8]]) +
+  plot_layout(guides = "collect") +
+  plot_annotation(theme = theme(legend.position = "bottom"))
+
+# 5) Create a shared bottom x-axis label row
+xlab_row <- wrap_elements(full = grid::textGrob(
+  "Standardized Regression Coefficients (β)",
+  gp = grid::gpar(fontsize = 14)
+))
+
+# 6) Stack panels over the shared x label
+final_plot <- wrap_plots(coef_panels, xlab_row, ncol = 1, heights = c(1, 0.06))
+
+ggsave(
+  "C:/Users/DrewIvory/OneDrive - University of Florida/Desktop/School/PHD/01_Projects/01_FuelDynamics/03_Figure/O2/Combined_FireBehavior__SecRegPlot.png",
+  plot  = final_plot,
+  width = 12,
+  height = 9,
+  dpi   = 300
+)
+```
+
